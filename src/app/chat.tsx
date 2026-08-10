@@ -9,11 +9,22 @@ export default function ChatScreen() {
   const [inputText, setInputText] = useState('');
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
+  // Función para marcar como leídos los mensajes que te envió este usuario
+  const markMessagesAsRead = async (userId: string) => {
+    await supabase
+      .from('messages')
+      .update({ is_read: true })
+      .eq('sender_id', receiverId)
+      .eq('receiver_id', userId)
+      .eq('is_read', false);
+  };
+
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
       if (data?.user) {
         setCurrentUserId(data.user.id);
         fetchMessages(data.user.id);
+        markMessagesAsRead(data.user.id); // <-- Se marca como leído al abrir el chat
       }
     });
 
@@ -27,6 +38,11 @@ export default function ChatScreen() {
           (newMsg.sender_id === receiverId && newMsg.receiver_id === currentUserId)
         ) {
           setMessages((prev) => [...prev, newMsg]);
+          
+          // Si el mensaje nuevo viene del otro usuario, lo marcamos como leído inmediatamente
+          if (newMsg.sender_id === receiverId) {
+            markMessagesAsRead(currentUserId!);
+          }
         }
       })
       .subscribe();
