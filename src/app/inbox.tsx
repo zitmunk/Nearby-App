@@ -47,9 +47,13 @@ export default function InboxScreen() {
         renderItem={({ item }) => (
           <TouchableOpacity 
             style={styles.chatItem}
+            activeOpacity={0.8}
             onPress={() => router.push({ pathname: '/chat', params: { receiverId: item.sender_id, receiverName: 'Usuario' } })}
           >
-            <Image source={{ uri: 'https://via.placeholder.com/50' }} style={styles.avatar} />
+            <Image 
+              source={{ uri: item.profiles?.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300' }} 
+              style={styles.avatar} 
+            />
             <View style={styles.chatInfo}>
               <Text style={styles.userName}>Chat con {item.sender_id}</Text>
               <Text style={styles.lastMessage} numberOfLines={1}>{item.content}</Text>
@@ -62,11 +66,21 @@ export default function InboxScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff', paddingTop: 50, paddingHorizontal: 20 },
-  title: { fontSize: 22, fontWeight: 'bold', marginBottom: 20 },
-  chatItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
-  avatar: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#e5e7eb' },
+  container: { flex: 1, backgroundColor: '#090d16', paddingTop: 50, paddingHorizontal: 20 },
+  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 20, color: '#f9fafb' },
+  chatItem: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    paddingVertical: 14, 
+    paddingHorizontal: 14,
+    backgroundColor: '#111827',
+    borderRadius: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#1f2937'
+  },
+  avatar: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#1f2937' },
   chatInfo: { marginLeft: 15, flex: 1 },
-  userName: { fontSize: 16, fontWeight: '600' },
-  lastMessage: { color: '#6b7280', marginTop: 2 }
+  userName: { fontSize: 16, fontWeight: '600', color: '#f9fafb' },
+  lastMessage: { color: '#94a3b8', marginTop: 2, fontSize: 13 }
 });
