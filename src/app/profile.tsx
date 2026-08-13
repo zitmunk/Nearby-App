@@ -1,13 +1,17 @@
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { supabase } from '../supabase';
 
 export default function ProfileScreen() {
+  const router = useRouter();
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
   const [birthDate, setBirthDate] = useState('');
+  const [bio, setBio] = useState('');
+  const [interests, setInterests] = useState('');
   const [avatarUrl, setAvatarUrl] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -29,15 +33,16 @@ export default function ProfileScreen() {
         setFullName(data.full_name || '');
         setUsername(data.username || '');
         setBirthDate(data.birth_date || '');
+        setBio(data.bio || '');
+        setInterests(data.interests || '');
         setAvatarUrl(data.avatar_url || '');
       }
     }
     setLoading(false);
   }
 
-  // --- NUEVA FUNCIÓN: Abrir galería y subir imagen ---
+  // --- Abrir galería y subir imagen al Bucket de Supabase ---
   async function pickAndUploadImage() {
-    // 1. Solicitar permisos para acceder a la galería
     const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
 
     if (permissionResult.status !== 'granted') {
@@ -45,49 +50,46 @@ export default function ProfileScreen() {
       return;
     }
 
-    // 2. Abrir el selector de imágenes
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true, // Permitir recortar
-      aspect: [1, 1], // Forzar formato cuadrado (avatar)
-      quality: 0.8, // Calidad de compresión
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.8,
     });
 
     if (result.canceled) return;
 
     setLoading(true);
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!user) {
+      setLoading(false);
+      return;
+    }
 
     try {
-      // 3. Preparar los datos de la imagen para subirlos
       const imageUri = result.assets[0].uri;
       const fileExt = imageUri.substring(imageUri.lastIndexOf('.') + 1);
       const fileName = `${user.id}_${Date.now()}.${fileExt}`;
-      const filePath = fileName; // Subimos directamente al bucket 'avatars'
+      const filePath = fileName;
 
-      // Convertir la URI a un Blob (requerido para React Native/Supabase)
       const response = await fetch(imageUri);
       const blob = await response.blob();
 
-      // 4. Subir al bucket 'avatars' de Supabase Storage
       const { error: uploadError } = await supabase.storage
         .from('avatars')
         .upload(filePath, blob, {
           contentType: `image/${fileExt}`,
-          upsert: true // Sobrescribir si ya existe
+          upsert: true
         });
 
       if (uploadError) throw uploadError;
 
-      // 5. Obtener la URL pública de la imagen recién subida
       const { data: { publicUrl } } = supabase.storage
         .from('avatars')
         .getPublicUrl(filePath);
 
-      setAvatarUrl(publicUrl); // Actualizar el estado visualmente
-      // NOTA: La imagen no se guarda definitivamente en la BD hasta pulsar "Guardar"
-      Alert.alert('Imagen subida', 'Toca "Guardar" para actualizar tu perfil.');
+      setAvatarUrl(publicUrl);
+      Alert.alert('Imagen subida', 'Toca "Guardar" para actualizar tu perfil definitivamente.');
 
     } catch (error: any) {
       console.error('Error detallado:', error);
@@ -97,18 +99,21 @@ export default function ProfileScreen() {
     }
   }
 
+  // --- Guardar perfil y ubicación con formato WKT exacto para PostGIS ---
   async function updateProfileAndLocation() {
     setLoading(true);
 
     const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permiso denegado', 'Se requiere acceso a la ubicación para calcular distancias.');
-      setLoading(false);
-      return;
-    }
+    let latitude = -20.2642; 
+    let longitude = -70.1185;
 
-    const location = await Location.getCurrentPositionAsync({});
-    const { latitude, longitude } = location.coords;
+    if (status === 'granted') {
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      latitude = location.coords.latitude;
+      longitude = location.coords.longitude;
+    }
 
     const { data: { user } } = await supabase.auth.getUser();
 
@@ -118,7 +123,8 @@ export default function ProfileScreen() {
       return;
     }
 
-    const pointLocation = `POINT(${longitude} ${latitude})`;
+    // Formato requerido para que la función RPC 'get_nearby_users' interprete el punto geográfico
+    const pointLocation = `SRID=4326;POINT(${longitude} ${latitude})`;
 
     const { error } = await supabase
       .from('profiles')
@@ -126,8 +132,10 @@ export default function ProfileScreen() {
         id: user.id,
         full_name: fullName,
         username: username,
-        birth_date: birthDate,
-        avatar_url: avatarUrl, // ESTA LÍNEA YA EXISTÍA Y AHORA TIENE LA URL
+        birth_date: birthDate || null,
+        bio: bio,
+        interests: interests,
+        avatar_url: avatarUrl,
         location: pointLocation,
         updated_at: new Date().toISOString(),
       });
@@ -135,24 +143,30 @@ export default function ProfileScreen() {
     if (error) {
       Alert.alert('Error al guardar', error.message);
     } else {
-      Alert.alert('¡Perfil actualizado!', 'Tus datos, foto y ubicación GPS se guardaron correctamente.');
+      Alert.alert('¡Perfil actualizado!', 'Tus datos, biografía y ubicación GPS se guardaron correctamente.');
+      router.back(); // Regresa al feed o pantalla anterior automáticamente
     }
 
     setLoading(false);
+  }
+
+  // --- Función para Cerrar Sesión ---
+  async function handleSignOut() {
+    await supabase.auth.signOut();
+    router.replace('/');
   }
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>Mi Perfil</Text>
 
-      {/* --- MODIFICADO: Ahora la imagen es un botón táctil --- */}
       <TouchableOpacity onPress={pickAndUploadImage} style={styles.avatarWrapper} disabled={loading}>
         <Image 
           source={{ uri: avatarUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400' }} 
           style={styles.avatar} 
         />
         <View style={styles.overlay}>
-          {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.editText}>Editar</Text>}
+          {loading ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.editText}>Editar</Text>}
         </View>
       </TouchableOpacity>
       <Text style={styles.helpText}>Toca tu foto para cambiarla</Text>
@@ -161,6 +175,7 @@ export default function ProfileScreen() {
       <TextInput
         style={styles.input}
         placeholder="Ej: Juan Pérez"
+        placeholderTextColor="#9ca3af"
         value={fullName}
         onChangeText={setFullName}
       />
@@ -169,6 +184,7 @@ export default function ProfileScreen() {
       <TextInput
         style={styles.input}
         placeholder="Ej: juanp"
+        placeholderTextColor="#9ca3af"
         value={username}
         onChangeText={setUsername}
         autoCapitalize='none'
@@ -178,8 +194,29 @@ export default function ProfileScreen() {
       <TextInput
         style={styles.input}
         placeholder="1995-05-20"
+        placeholderTextColor="#9ca3af"
         value={birthDate}
         onChangeText={setBirthDate}
+      />
+
+      <Text style={styles.label}>Biografía:</Text>
+      <TextInput
+        style={[styles.input, styles.textArea]}
+        placeholder="Cuéntanos un poco sobre ti..."
+        placeholderTextColor="#9ca3af"
+        value={bio}
+        onChangeText={setBio}
+        multiline
+        numberOfLines={3}
+      />
+
+      <Text style={styles.label}>Intereses:</Text>
+      <TextInput
+        style={styles.input}
+        placeholder="Ej: Tecnología, Música, Viajes..."
+        placeholderTextColor="#9ca3af"
+        value={interests}
+        onChangeText={setInterests}
       />
 
       <TouchableOpacity style={styles.button} onPress={updateProfileAndLocation} disabled={loading}>
@@ -189,23 +226,31 @@ export default function ProfileScreen() {
           <Text style={styles.buttonText}>Guardar y Actualizar GPS</Text>
         )}
       </TouchableOpacity>
+
+      <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut} disabled={loading}>
+        <Text style={styles.signOutText}>Cerrar Sesión</Text>
+      </TouchableOpacity>
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flexGrow: 1, padding: 20, backgroundColor: '#fff', justifyContent: 'center' },
-  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 10, textAlign: 'center' },
+  container: { flexGrow: 1, padding: 20, backgroundColor: '#fff', paddingVertical: 50 },
+  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 15, textAlign: 'center', color: '#1f2937' },
   
-  // Nuevos estilos para la foto interactiva
   avatarWrapper: { alignSelf: 'center', position: 'relative', marginBottom: 5, borderRadius: 60, overflow: 'hidden' },
-  avatar: { width: 120, height: 120, borderRadius: 60, borderWidth: 3, borderColor: '#ddd' },
-  overlay: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.5)', padding: 4, alignItems: 'center' },
+  avatar: { width: 120, height: 120, borderRadius: 60, borderWidth: 3, borderColor: '#e5e7eb', backgroundColor: '#e1e4e8' },
+  overlay: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.6)', padding: 6, alignItems: 'center' },
   editText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
-  helpText: { fontSize: 12, color: '#666', textAlign: 'center', marginBottom: 20, fontStyle: 'italic' },
+  helpText: { fontSize: 12, color: '#6b7280', textAlign: 'center', marginBottom: 20, fontStyle: 'italic' },
 
-  label: { fontSize: 14, color: '#333', marginBottom: 6, fontWeight: '600' },
-  input: { borderWidth: 1, borderColor: '#ccc', padding: 12, borderRadius: 8, marginBottom: 16, backgroundColor: '#f9f9f9' },
+  label: { fontSize: 14, color: '#374151', marginBottom: 6, fontWeight: '600' },
+  input: { borderWidth: 1, borderColor: '#d1d5db', padding: 12, borderRadius: 8, marginBottom: 16, backgroundColor: '#f9fafb', color: '#1f2937' },
+  textArea: { height: 80, textAlignVertical: 'top' },
+  
   button: { backgroundColor: '#007AFF', padding: 16, borderRadius: 8, alignItems: 'center', marginTop: 10, elevation: 2 },
   buttonText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+
+  signOutButton: { backgroundColor: '#fee2e2', padding: 16, borderRadius: 8, alignItems: 'center', marginTop: 12, marginBottom: 20 },
+  signOutText: { color: '#ef4444', fontWeight: 'bold', fontSize: 16 },
 });

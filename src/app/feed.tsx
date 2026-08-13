@@ -15,9 +15,8 @@ export default function FeedScreen() {
     setErrorMessage(null);
 
     try {
-      // 1. Obtener la ubicación real del celular actual
       let { status } = await Location.requestForegroundPermissionsAsync();
-      let lat = -20.2642; // Coordenada por defecto (Alto Hospicio/Iquique)
+      let lat = -20.2642; 
       let long = -70.1185;
 
       if (status === 'granted') {
@@ -28,13 +27,11 @@ export default function FeedScreen() {
         long = location.coords.longitude;
       }
 
-      const radiusMeters = 50000; // 50 km
+      const radiusMeters = 50000; 
 
-      // 2. Obtener el usuario actual para excluirlo del listado
       const { data: authData } = await supabase.auth.getUser();
       const currentUserId = authData?.user?.id;
 
-      // 3. Consultar la función RPC de usuarios cercanos
       const { data, error } = await supabase.rpc('get_nearby_users', {
         lat: lat,
         long: long,
@@ -42,13 +39,10 @@ export default function FeedScreen() {
       });
 
       if (error) {
-        console.error('Error al obtener usuarios:', error.message);
         setErrorMessage(error.message);
       } else {
-        // Filtrar para excluir al usuario logueado actual
         const filteredUsers = (data || []).filter((item: any) => item.id !== currentUserId);
 
-        // 4. Verificar si cada usuario tiene mensajes no leídos dirigidos a mí
         const usersWithUnreadStatus = await Promise.all(
           filteredUsers.map(async (user: any) => {
             const { count } = await supabase
@@ -68,7 +62,6 @@ export default function FeedScreen() {
         setUsers(usersWithUnreadStatus);
       }
     } catch (err: any) {
-      console.error('Error inesperado al buscar ubicación/usuarios:', err);
       setErrorMessage(err.message);
     } finally {
       setLoading(false);
@@ -77,18 +70,11 @@ export default function FeedScreen() {
 
   useEffect(() => {
     fetchNearbyUsers();
-
-    // Suscripción en tiempo real: Se actualiza solo si hay cambios en la tabla profiles
     const channel = supabase
       .channel('public:profiles')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'profiles' },
-        () => {
-          console.log('¡Cambio detectado en perfiles! Actualizando lista...');
-          fetchNearbyUsers();
-        }
-      )
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
+        fetchNearbyUsers();
+      })
       .subscribe();
 
     return () => {
@@ -98,15 +84,18 @@ export default function FeedScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Usuarios Cercanos</Text>
+      <View style={styles.headerRow}>
+        <Text style={styles.title}>Usuarios Cercanos</Text>
+        <TouchableOpacity style={styles.profileButton} onPress={() => router.push('/profile')}>
+          <Text style={styles.profileButtonText}>Mi Perfil ⚙️</Text>
+        </TouchableOpacity>
+      </View>
 
       <TouchableOpacity style={styles.button} onPress={fetchNearbyUsers}>
         <Text style={styles.buttonText}>Actualizar Lista</Text>
       </TouchableOpacity>
 
-      {errorMessage && (
-        <Text style={styles.errorText}>Error Supabase: {errorMessage}</Text>
-      )}
+      {errorMessage && <Text style={styles.errorText}>Error: {errorMessage}</Text>}
 
       {loading && users.length === 0 ? (
         <ActivityIndicator size="large" color="#007AFF" style={{ marginTop: 20 }} />
@@ -114,9 +103,7 @@ export default function FeedScreen() {
         <FlatList
           data={users}
           keyExtractor={(item) => item.id}
-          ListEmptyComponent={
-            <Text style={styles.empty}>No hay usuarios conectados cerca de ti en este momento.</Text>
-          }
+          ListEmptyComponent={<Text style={styles.empty}>No hay nadie cerca por ahora.</Text>}
           renderItem={({ item }) => (
             <TouchableOpacity 
               style={styles.card}
@@ -125,14 +112,14 @@ export default function FeedScreen() {
                 params: { receiverId: item.id, receiverName: item.full_name || item.username }
               })}
             >
-              {/* Contenedor del avatar con el punto rojo condicional */}
               <View style={styles.avatarContainer}>
                 <Image 
-                  source={{ 
-                    uri: item.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100' 
-                  }} 
+                  source={{ uri: item.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100' }} 
                   style={styles.avatar} 
                 />
+                {/* Punto Verde: Indica disponibilidad (online) */}
+                <View style={styles.onlineDot} />
+                {/* Punto Rojo: Indica mensajes no leídos */}
                 {item.hasUnread && <View style={styles.redDot} />}
               </View>
               
@@ -152,15 +139,26 @@ export default function FeedScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, backgroundColor: '#f5f5f5', paddingTop: 50 },
-  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 15, color: '#333' },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },
+  title: { fontSize: 24, fontWeight: 'bold', color: '#1f2937' },
+  profileButton: { backgroundColor: '#e5e7eb', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8 },
+  profileButtonText: { color: '#374151', fontWeight: 'bold', fontSize: 14 },
   button: { backgroundColor: '#007AFF', padding: 12, borderRadius: 8, alignItems: 'center', marginBottom: 15 },
   buttonText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
   card: { flexDirection: 'row', alignItems: 'center', padding: 15, backgroundColor: '#fff', borderRadius: 8, marginVertical: 6, borderWidth: 1, borderColor: '#ddd' },
-  avatarContainer: {
-    position: 'relative',
-    marginRight: 12,
-  },
+  avatarContainer: { position: 'relative', marginRight: 15 },
   avatar: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#e1e4e8' },
+  onlineDot: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#22c55e',
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
   redDot: {
     position: 'absolute',
     top: 0,
