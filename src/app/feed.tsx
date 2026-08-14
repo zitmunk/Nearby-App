@@ -3,6 +3,7 @@ import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { supabase } from '../supabase';
+import { Colors } from './constants/Colors';
 
 export default function FeedScreen() {
   const [activeTab, setActiveTab] = useState<'users' | 'chats'>('users');
@@ -118,14 +119,12 @@ export default function FeedScreen() {
           if (!companionIds.has(companionId)) {
             companionIds.add(companionId);
 
-            // Obtener información del perfil del compañero de chat
             const { data: profileData } = await supabase
               .from('profiles')
               .select('*')
               .eq('id', companionId)
               .single();
 
-            // Verificar si hay mensajes no leídos de este usuario
             const { count } = await supabase
               .from('messages')
               .select('*', { count: 'exact', head: true })
@@ -166,7 +165,7 @@ export default function FeedScreen() {
       {/* CONTENIDO PRINCIPAL */}
       <View style={{ flex: 1, paddingBottom: 70 }}>
         {loading && (users.length === 0 && chats.length === 0) ? (
-          <ActivityIndicator size="large" color="#38bdf8" style={{ marginTop: 20 }} />
+          <ActivityIndicator size="large" color={Colors.primaryLight} style={{ marginTop: 20 }} />
         ) : activeTab === 'users' ? (
           <FlatList
             key="grid-3"
@@ -257,11 +256,11 @@ export default function FeedScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 8, backgroundColor: '#090d16', paddingTop: 50 },
+  container: { flex: 1, padding: 8, backgroundColor: Colors.background, paddingTop: 50 },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, paddingHorizontal: 4 },
-  title: { fontSize: 22, fontWeight: 'bold', color: '#f9fafb' },
-  profileButton: { backgroundColor: '#111827', padding: 8, borderRadius: 12, borderWidth: 1, borderColor: '#1f2937' },
-  profileButtonText: { color: '#f8fafc', fontWeight: 'bold', fontSize: 14 },
+  title: { fontSize: 22, fontWeight: 'bold', color: Colors.textPrimary },
+  profileButton: { backgroundColor: Colors.surface, padding: 8, borderRadius: 12, borderWidth: 1, borderColor: Colors.border },
+  profileButtonText: { color: Colors.textPrimary, fontWeight: 'bold', fontSize: 14 },
   
   columnWrapper: { justifyContent: 'flex-start' },
   card: {
@@ -269,11 +268,11 @@ const styles = StyleSheet.create({
     margin: 3,
     borderRadius: 14,
     overflow: 'hidden',
-    backgroundColor: '#111827',
+    backgroundColor: Colors.surface,
     aspectRatio: 1,
     maxWidth: '31.3%',
     borderWidth: 1,
-    borderColor: '#1f2937',
+    borderColor: Colors.border,
     elevation: 4,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -283,29 +282,27 @@ const styles = StyleSheet.create({
   },
   avatar: { width: '100%', height: '100%', resizeMode: 'cover' },
   indicatorsContainer: { position: 'absolute', top: 6, right: 6, flexDirection: 'row', alignItems: 'center', gap: 4 },
-  onlineDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: '#22c55e', borderWidth: 1.5, borderColor: '#090d16' },
-  redDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: '#ef4444', borderWidth: 1.5, borderColor: '#090d16' },
-  redDotLarge: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#ef4444' },
+  onlineDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: Colors.success, borderWidth: 1.5, borderColor: Colors.background },
+  redDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: Colors.danger, borderWidth: 1.5, borderColor: Colors.background },
+  redDotLarge: { width: 10, height: 10, borderRadius: 5, backgroundColor: Colors.danger },
   overlay: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 6, backgroundColor: 'rgba(9, 13, 22, 0.8)' },
-  name: { fontSize: 11, fontWeight: 'bold', color: '#f9fafb' },
-  distance: { fontSize: 9, color: '#94a3b8', marginTop: 1, fontWeight: '600' },
+  name: { fontSize: 11, fontWeight: 'bold', color: Colors.textPrimary },
+  distance: { fontSize: 9, color: Colors.textSecondary, marginTop: 1, fontWeight: '600' },
 
-  // Estilos para la lista de chats
-  chatCard: { flexDirection: 'row', backgroundColor: '#111827', padding: 12, borderRadius: 16, marginVertical: 4, alignItems: 'center', borderWidth: 1, borderColor: '#1f2937' },
+  chatCard: { flexDirection: 'row', backgroundColor: Colors.surface, padding: 12, borderRadius: 16, marginVertical: 4, alignItems: 'center', borderWidth: 1, borderColor: Colors.border },
   chatAvatar: { width: 50, height: 50, borderRadius: 25, marginRight: 12 },
   chatInfo: { flex: 1 },
   chatHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  chatName: { fontSize: 15, fontWeight: 'bold', color: '#f9fafb' },
-  chatLastMessage: { fontSize: 13, color: '#94a3b8' },
+  chatName: { fontSize: 15, fontWeight: 'bold', color: Colors.textPrimary },
+  chatLastMessage: { fontSize: 13, color: Colors.textSecondary },
 
-  empty: { textAlign: 'center', marginTop: 40, color: '#94a3b8', fontSize: 15 },
-  errorText: { color: '#f87171', marginVertical: 10, textAlign: 'center', fontWeight: 'bold' },
+  empty: { textAlign: 'center', marginTop: 40, color: Colors.textSecondary, fontSize: 15 },
+  errorText: { color: Colors.danger, marginVertical: 10, textAlign: 'center', fontWeight: 'bold' },
 
-  // Menú inferior fijo
-  bottomNav: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: '#111827', flexDirection: 'row', borderTopWidth: 1, borderTopColor: '#1f2937', justifyContent: 'space-around', alignItems: 'center', paddingBottom: 5, elevation: 10 },
+  bottomNav: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: Colors.surface, flexDirection: 'row', borderTopWidth: 1, borderTopColor: Colors.border, justifyContent: 'space-around', alignItems: 'center', paddingBottom: 5, elevation: 10 },
   navButton: { alignItems: 'center', justifyContent: 'center', flex: 1, height: '100%' },
-  navButtonActive: { borderTopWidth: 3, borderTopColor: '#38bdf8' },
+  navButtonActive: { borderTopWidth: 3, borderTopColor: Colors.primaryLight },
   navIcon: { fontSize: 18 },
-  navText: { fontSize: 11, color: '#94a3b8', fontWeight: '500', marginTop: 2 },
-  navTextActive: { color: '#38bdf8', fontWeight: 'bold' },
+  navText: { fontSize: 11, color: Colors.textSecondary, fontWeight: '500', marginTop: 2 },
+  navTextActive: { color: Colors.primaryLight, fontWeight: 'bold' },
 });

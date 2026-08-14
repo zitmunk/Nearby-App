@@ -1,9 +1,11 @@
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as ScreenCapture from 'expo-screen-capture';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Modal, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { supabase } from '../supabase';
+import { Colors } from './constants/Colors';
 
 export default function ChatScreen() {
   const { receiverId, receiverName } = useLocalSearchParams();
@@ -12,6 +14,10 @@ export default function ChatScreen() {
   const [inputText, setInputText] = useState('');
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+
+  // --- NUEVOS ESTADOS PARA EL VISOR DE IMÁGENES (MODAL) ---
+  const [selectedImage, setSelectedImage] = useState<any>(null);
+  const [modalVisible, setModalVisible] = useState(false);
 
   // --- ESTADOS Y REFERENCIAS PARA "ESCRIBIENDO...", "AUTODESTRUCCIÓN" Y "BLOQUEO" ---
   const [isTyping, setIsTyping] = useState(false);
@@ -32,6 +38,27 @@ export default function ChatScreen() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // --- BLOQUEO DE CAPTURAS DE PANTALLA ---
+  useEffect(() => {
+    const setupScreenProtection = async () => {
+      try {
+        const isAvailable = await ScreenCapture.isAvailableAsync();
+        if (isAvailable) {
+          await ScreenCapture.preventScreenCaptureAsync();
+        }
+      } catch (error) {
+        console.log("Error activando protección de pantalla:", error);
+      }
+    };
+
+    setupScreenProtection();
+
+    // Al salir del chat, permitimos nuevamente la captura de pantalla
+    return () => {
+      ScreenCapture.allowScreenCaptureAsync();
+    };
+  }, [receiverId]);
 
   // --- FUNCIÓN: BLOQUEAR USUARIO ---
   const handleBlockUser = async () => {
@@ -107,11 +134,9 @@ export default function ChatScreen() {
       fetchMessages(userId);
       markMessagesAsRead(userId);
 
-      // Creamos un ID de sala único y compartido ordenando los IDs alfabéticamente
       const sortedIds = [userId, receiverId].sort();
       const roomName = `room_${sortedIds[0]}_${sortedIds[1]}`;
 
-      // Canal unificado con Broadcast y Postgres Changes
       channel = supabase.channel(roomName, {
         config: {
           broadcast: { self: false },
@@ -154,7 +179,6 @@ export default function ChatScreen() {
     };
   }, [receiverId]);
 
-  // --- MANEJO DE EVENTO CUANDO ESCRIBES ---
   const handleTextChange = (text: string) => {
     setInputText(text);
 
@@ -267,39 +291,38 @@ export default function ChatScreen() {
     }
   };
 
-  const handleOpenImage = async (item: any) => {
-    if (item.is_disappearing && !item.viewed && item.sender_id !== currentUserId) {
-      Alert.alert(
-        "Foto Temporal",
-        "Esta foto desaparecerá para siempre al abrirse.",
-        [
-          { text: "Cancelar", style: "cancel" },
-          {
-            text: "Ver foto",
-            onPress: async () => {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === item.id
-                    ? { ...m, viewed: true, image_url: null, content: '🔥 [Foto vista y expirada]' }
-                    : m
-                )
-              );
+  const handleOpenImage = (item: any) => {
+    setSelectedImage(item);
+    setModalVisible(true);
+  };
 
-              await supabase
-                .from('messages')
-                .update({ viewed: true, image_url: null, content: '🔥 [Foto vista y expirada]' })
-                .eq('id', item.id);
+  const destroyImageViewed = async () => {
+    if (!selectedImage) return;
 
-              if (item.image_url) {
-                const pathParts = item.image_url.split('/');
-                const fileName = pathParts[pathParts.length - 1];
-                await supabase.storage.from('chat-images').remove([fileName]);
-              }
-            }
-          }
-        ]
+    const item = selectedImage;
+    setModalVisible(false);
+
+    if (item.is_disappearing && item.sender_id !== currentUserId && !item.viewed) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === item.id
+            ? { ...m, viewed: true, image_url: null, content: '🔥 [Foto vista y expirada]' }
+            : m
+        )
       );
+
+      await supabase
+        .from('messages')
+        .update({ viewed: true, image_url: null, content: '🔥 [Foto vista y expirada]' })
+        .eq('id', item.id);
+
+      if (item.image_url) {
+        const pathParts = item.image_url.split('/');
+        const fileName = pathParts[pathParts.length - 1];
+        await supabase.storage.from('chat-images').remove([fileName]);
+      }
     }
+    setSelectedImage(null);
   };
 
   return (
@@ -308,8 +331,7 @@ export default function ChatScreen() {
       style={styles.container}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
     >
-      {/* HEADER OSCURO CON DEGRADADO EN CIAN */}
-      <LinearGradient colors={['#0284c7', '#090d16']} style={styles.header}>
+      <LinearGradient colors={[Colors.primary, Colors.background]} style={styles.header}>
         <View style={styles.headerContent}>
           <TouchableOpacity onPress={() => router.back()} activeOpacity={0.8} style={styles.backButton}>
             <Text style={styles.backButtonText}>←</Text>
@@ -359,14 +381,37 @@ export default function ChatScreen() {
         onLayout={scrollToBottom}
       />
 
+      <Modal visible={modalVisible} transparent={true} animationType="fade" onRequestClose={destroyImageViewed}>
+        <View style={styles.imageModalOverlay}>
+          {selectedImage && (
+            <View style={styles.imageModalContainer}>
+              <Image 
+                source={{ uri: selectedImage.image_url }} 
+                style={styles.fullScreenImage} 
+                resizeMode="contain" 
+              />
+              {selectedImage.is_disappearing && selectedImage.sender_id !== currentUserId && !selectedImage.viewed && (
+                <Text style={styles.modalWarningText}>🔥 Esta foto se destruirá al cerrar</Text>
+              )}
+              <TouchableOpacity 
+                style={styles.closeModalButton} 
+                onPress={destroyImageViewed}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.closeModalButtonText}>Cerrar y Destruir</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </Modal>
+
       {uploading && (
         <View style={styles.uploadingContainer}>
-          <ActivityIndicator size="small" color="#38bdf8" />
+          <ActivityIndicator size="small" color={Colors.primaryLight} />
           <Text style={styles.uploadingText}>Enviando imagen...</Text>
         </View>
       )}
 
-      {/* INPUT MODERNO O AVISO DE BLOQUEO */}
       {isBlocked ? (
         <View style={styles.blockedNoticeContainer}>
           <Text style={styles.blockedNoticeText}>Has bloqueado o te han bloqueado en esta conversación.</Text>
@@ -380,7 +425,6 @@ export default function ChatScreen() {
             <Text style={styles.mediaButtonIcon}>📷</Text>
           </TouchableOpacity>
 
-          {/* BOTÓN DE AUTODESTRUCCIÓN DE FOTOS */}
           <TouchableOpacity 
             style={[styles.fireButton, isDisappearing && styles.fireButtonActive]} 
             onPress={() => setIsDisappearing(!isDisappearing)}
@@ -392,7 +436,7 @@ export default function ChatScreen() {
           <TextInput
             style={styles.input}
             placeholder={isDisappearing ? "Foto temporal..." : "¡Escribe algo increíble..."}
-            placeholderTextColor="#64748b"
+            placeholderTextColor={Colors.textSecondary}
             value={inputText}
             onChangeText={handleTextChange}
             multiline
@@ -407,7 +451,7 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#090d16' },
+  container: { flex: 1, backgroundColor: Colors.background },
   
   header: { 
     paddingTop: 50, 
@@ -423,11 +467,11 @@ const styles = StyleSheet.create({
   },
   headerContent: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   backButton: { marginRight: 12, padding: 4 },
-  backButtonText: { color: '#ffffff', fontSize: 24, fontWeight: 'bold' },
+  backButtonText: { color: Colors.textPrimary, fontSize: 24, fontWeight: 'bold' },
   headerTextWrapper: { flex: 1 },
-  logo: { fontSize: 14, fontWeight: '900', color: '#bae6fd', letterSpacing: 3, marginBottom: 2 },
-  headerTitle: { fontSize: 16, fontWeight: 'bold', color: '#f9fafb' },
-  typingIndicator: { fontSize: 11, color: '#38bdf8', fontWeight: 'bold', marginTop: 2 },
+  logo: { fontSize: 14, fontWeight: '900', color: Colors.primaryLight, letterSpacing: 3, marginBottom: 2 },
+  headerTitle: { fontSize: 16, fontWeight: 'bold', color: Colors.textPrimary },
+  typingIndicator: { fontSize: 11, color: Colors.primaryLight, fontWeight: 'bold', marginTop: 2 },
   
   blockBtn: { padding: 8, backgroundColor: 'rgba(255, 255, 255, 0.1)', borderRadius: 20 },
   unblockBtnActive: { backgroundColor: 'rgba(34, 197, 94, 0.3)' },
@@ -446,31 +490,31 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 2
   },
-  myMessage: { backgroundColor: '#0284c7', alignSelf: 'flex-end', borderBottomRightRadius: 4 },
-  otherMessage: { backgroundColor: '#1f2937', alignSelf: 'flex-start', borderBottomLeftRadius: 4 },
+  myMessage: { backgroundColor: Colors.primary, alignSelf: 'flex-end', borderBottomRightRadius: 4 },
+  otherMessage: { backgroundColor: Colors.cardBackground, alignSelf: 'flex-start', borderBottomLeftRadius: 4 },
   
   messageText: { fontSize: 15 },
-  myMessageText: { color: '#ffffff' },
-  otherMessageText: { color: '#f9fafb' },
+  myMessageText: { color: Colors.textPrimary },
+  otherMessageText: { color: Colors.textPrimary },
   
-  chatImage: { width: 200, height: 200, borderRadius: 12, marginBottom: 6, backgroundColor: '#111827' },
-  disappearingBadge: { fontSize: 11, color: '#38bdf8', fontWeight: 'bold', marginTop: 2, textAlign: 'center' },
+  chatImage: { width: 200, height: 200, borderRadius: 12, marginBottom: 6, backgroundColor: Colors.surface },
+  disappearingBadge: { fontSize: 11, color: Colors.primaryLight, fontWeight: 'bold', marginTop: 2, textAlign: 'center' },
   
-  uploadingContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 8, backgroundColor: '#111827' },
-  uploadingText: { marginLeft: 8, color: '#94a3b8', fontSize: 12, fontWeight: '500' },
+  uploadingContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 8, backgroundColor: Colors.surface },
+  uploadingText: { marginLeft: 8, color: Colors.textSecondary, fontSize: 12, fontWeight: '500' },
   
   inputContainer: { 
     flexDirection: 'row', 
     padding: 12, 
-    backgroundColor: '#111827', 
+    backgroundColor: Colors.surface, 
     borderTopWidth: 1, 
-    borderTopColor: '#1f2937', 
+    borderTopColor: Colors.border, 
     alignItems: 'center' 
   },
   mediaButton: { 
     padding: 8, 
     marginRight: 4, 
-    backgroundColor: '#1f2937', 
+    backgroundColor: Colors.cardBackground, 
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center'
@@ -480,24 +524,24 @@ const styles = StyleSheet.create({
   fireButton: { 
     padding: 8, 
     marginRight: 8, 
-    backgroundColor: '#1f2937', 
+    backgroundColor: Colors.cardBackground, 
     borderRadius: 20, 
     alignItems: 'center', 
     justifyContent: 'center',
     opacity: 0.4 
   },
-  fireButtonActive: { opacity: 1, backgroundColor: '#0c4a6e', transform: [{ scale: 1.05 }] },
+  fireButtonActive: { opacity: 1, backgroundColor: Colors.primary, transform: [{ scale: 1.05 }] },
   
   input: { 
     flex: 1, 
-    backgroundColor: '#090d16', 
+    backgroundColor: Colors.background, 
     borderWidth: 1, 
-    borderColor: '#1f2937', 
+    borderColor: Colors.border, 
     borderRadius: 20, 
     paddingHorizontal: 16, 
     paddingVertical: 10, 
     fontSize: 15, 
-    color: '#f9fafb',
+    color: Colors.textPrimary,
     maxHeight: 100
   },
   
@@ -507,24 +551,61 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 16, 
     marginLeft: 8, 
-    backgroundColor: '#0284c7', 
+    backgroundColor: Colors.primary, 
     borderRadius: 20,
-    shadowColor: '#0284c7',
+    shadowColor: Colors.primary,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.4,
     shadowRadius: 4,
     elevation: 3
   },
-  sendButtonText: { color: '#ffffff', fontWeight: 'bold', fontSize: 14 },
+  sendButtonText: { color: Colors.textPrimary, fontWeight: 'bold', fontSize: 14 },
   
   blockedNoticeContainer: { 
     padding: 16, 
-    backgroundColor: '#1e1b18', 
+    backgroundColor: Colors.surface, 
     borderTopWidth: 1, 
-    borderTopColor: '#7f1d1d', 
+    borderTopColor: Colors.danger, 
     alignItems: 'center' 
   },
-  blockedNoticeText: { color: '#f87171', fontSize: 13, textAlign: 'center', marginBottom: 8, fontWeight: '500' },
-  unblockActionBtn: { backgroundColor: '#7f1d1d', paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20 },
-  unblockActionText: { color: '#ffffff', fontWeight: 'bold', fontSize: 14 }
+  blockedNoticeText: { color: Colors.danger, fontSize: 13, textAlign: 'center', marginBottom: 8, fontWeight: '500' },
+  unblockActionBtn: { backgroundColor: Colors.danger, paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20 },
+  unblockActionText: { color: Colors.textPrimary, fontWeight: 'bold', fontSize: 14 },
+
+  imageModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  imageModalContainer: {
+    width: '100%',
+    height: '80%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  fullScreenImage: {
+    width: '100%',
+    height: '80%',
+    borderRadius: 12,
+  },
+  modalWarningText: {
+    color: Colors.primaryLight,
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginVertical: 12,
+  },
+  closeModalButton: {
+    backgroundColor: Colors.danger,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 25,
+    marginTop: 10,
+  },
+  closeModalButtonText: {
+    color: Colors.textPrimary,
+    fontWeight: 'bold',
+    fontSize: 16,
+  }
 });
