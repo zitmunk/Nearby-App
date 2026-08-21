@@ -2,6 +2,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Colors } from '../constants/Colors';
 import { supabase } from '../supabase';
 
 const RELATIONSHIP_OPTIONS = ['Amistad', 'Citas', 'Casual / Express', 'Networking'];
@@ -54,6 +55,10 @@ export default function OnboardingScreen() {
       return;
     }
 
+    // Convertir de DD/MM/YYYY a YYYY-MM-DD para que la base de datos tipo 'date' lo acepte
+    const [day, month, year] = birthDate.split('/');
+    const formattedDateForDB = `${year}-${month}-${day}`;
+
     const age = calculateAge(birthDate);
     setLoading(true);
     const { data: { user } } = await supabase.auth.getUser();
@@ -65,8 +70,9 @@ export default function OnboardingScreen() {
 
     const { error } = await supabase.from('profiles').upsert({
       id: user.id,
-      age,
-      gender,
+      birth_date: formattedDateForDB,
+      age: age.toString(),
+      gender: gender,
       looking_for: lookingFor.join(', '),
       preference: preference.join(', '),
       onboarding_completed: true,
@@ -74,13 +80,16 @@ export default function OnboardingScreen() {
     });
 
     setLoading(false);
-    if (error) Alert.alert('Error', 'No se pudo guardar.');
-    else router.replace('/feed');
+    if (error) {
+      Alert.alert('Error', error.message);
+    } else {
+      router.replace('/feed');
+    }
   };
 
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.container}>
-      <LinearGradient colors={['#0284c7', '#090d16']} style={styles.headerGradient}>
+      <LinearGradient colors={['#0284c7', Colors.background]} style={styles.headerGradient}>
         <Text style={styles.logo}>N·O·W</Text>
         <Text style={styles.subtitle}>Completa tu perfil para comenzar</Text>
       </LinearGradient>
@@ -90,7 +99,7 @@ export default function OnboardingScreen() {
         <TextInput 
           style={styles.input} 
           placeholder="DD/MM/AAAA" 
-          placeholderTextColor="#64748b" 
+          placeholderTextColor={Colors.textMuted} 
           keyboardType="numeric" 
           maxLength={10} 
           value={birthDate} 
@@ -99,7 +108,7 @@ export default function OnboardingScreen() {
 
         <Text style={styles.label}>Tu género</Text>
         <TouchableOpacity style={styles.dropdownSelector} onPress={() => setShowGenderDropdown(!showGenderDropdown)} activeOpacity={0.8}>
-          <Text style={styles.dropdownSelectorText}>{gender || 'Selecciona...'}</Text>
+          <Text style={[styles.dropdownSelectorText, !gender && { color: Colors.textMuted }]}>{gender || 'Selecciona...'}</Text>
         </TouchableOpacity>
         
         {showGenderDropdown && (
@@ -134,7 +143,6 @@ export default function OnboardingScreen() {
   );
 }
 
-// Componente para las opciones seleccionables
 const CheckboxItem = ({ label, isSelected, onPress }: any) => (
   <TouchableOpacity style={[styles.checkboxItem, isSelected && styles.checkboxItemSelected]} onPress={onPress} activeOpacity={0.8}>
     <Text style={[styles.checkboxText, isSelected && styles.checkboxTextSelected]}>{label}</Text>
@@ -142,56 +150,56 @@ const CheckboxItem = ({ label, isSelected, onPress }: any) => (
 );
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#090d16' },
+  container: { flex: 1, backgroundColor: Colors.background },
   headerGradient: { paddingVertical: 50, paddingHorizontal: 20, alignItems: 'center', borderBottomLeftRadius: 28, borderBottomRightRadius: 28 },
-  logo: { fontSize: 32, fontWeight: '900', color: '#fff', letterSpacing: 5, marginBottom: 6 },
-  subtitle: { fontSize: 14, color: '#94a3b8', fontWeight: '500' },
+  logo: { fontSize: 32, fontWeight: '900', color: Colors.textPrimary, letterSpacing: 5, marginBottom: 6 },
+  subtitle: { fontSize: 14, color: Colors.textSecondary, fontWeight: '500' },
   
   formContainer: { padding: 24, paddingBottom: 60 },
-  label: { fontSize: 14, fontWeight: '600', color: '#e2e8f0', marginTop: 18, marginBottom: 8 },
+  label: { fontSize: 14, fontWeight: '600', color: Colors.textPrimary, marginTop: 18, marginBottom: 8 },
   
   input: { 
-    backgroundColor: '#111827', 
+    backgroundColor: Colors.surface, 
     padding: 14, 
     borderRadius: 14, 
     borderWidth: 1, 
-    borderColor: '#1f2937', 
-    color: '#f9fafb',
+    borderColor: '#262626', 
+    color: Colors.textPrimary,
     fontSize: 16
   },
   
   dropdownSelector: { 
-    backgroundColor: '#111827', 
+    backgroundColor: Colors.surface, 
     padding: 14, 
     borderRadius: 14, 
     borderWidth: 1, 
-    borderColor: '#1f2937',
+    borderColor: '#262626',
     justifyContent: 'center'
   },
-  dropdownSelectorText: { color: '#f9fafb', fontSize: 16 },
+  dropdownSelectorText: { color: Colors.textPrimary, fontSize: 16 },
   
   dropdownList: { 
-    backgroundColor: '#111827', 
+    backgroundColor: Colors.surface, 
     borderRadius: 14, 
     marginTop: 6, 
     borderWidth: 1, 
-    borderColor: '#1f2937',
+    borderColor: '#262626',
     overflow: 'hidden'
   },
-  dropdownItem: { padding: 14, borderBottomWidth: 1, borderBottomColor: '#1f2937' },
-  dropdownItemText: { color: '#f9fafb', fontSize: 15 },
+  dropdownItem: { padding: 14, borderBottomWidth: 1, borderBottomColor: '#262626' },
+  dropdownItemText: { color: Colors.textPrimary, fontSize: 15 },
   
   checkboxContainer: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   checkboxItem: { 
     paddingVertical: 10, 
     paddingHorizontal: 16, 
     borderRadius: 20, 
-    backgroundColor: '#111827', 
+    backgroundColor: Colors.surface, 
     borderWidth: 1, 
-    borderColor: '#1f2937' 
+    borderColor: '#262626' 
   },
   checkboxItemSelected: { backgroundColor: '#0c4a6e', borderColor: '#38bdf8' },
-  checkboxText: { color: '#94a3b8', fontSize: 14 },
+  checkboxText: { color: Colors.textSecondary, fontSize: 14 },
   checkboxTextSelected: { color: '#bae6fd', fontWeight: 'bold' },
   
   saveButton: { 
@@ -206,5 +214,5 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 4
   },
-  saveButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 16 }
+  saveButtonText: { color: Colors.textPrimary, fontWeight: 'bold', fontSize: 16 }
 });

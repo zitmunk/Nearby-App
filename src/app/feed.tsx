@@ -1,9 +1,10 @@
+import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Colors } from '../constants/Colors';
 import { supabase } from '../supabase';
-import { Colors } from './constants/Colors';
 
 export default function FeedScreen() {
   const [activeTab, setActiveTab] = useState<'users' | 'chats'>('users');
@@ -11,29 +12,72 @@ export default function FeedScreen() {
   const [chats, setChats] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [myAvatarUrl, setMyAvatarUrl] = useState<string | null>(null);
   const router = useRouter();
 
   useEffect(() => {
+    let isMounted = true;
+
+    fetchMyProfileAvatar();
+
     if (activeTab === 'users') {
       fetchNearbyUsers();
     } else {
       fetchUserChats();
     }
 
-    const channel = supabase
-      .channel('public:profiles_and_messages')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
-        if (activeTab === 'users') fetchNearbyUsers();
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, () => {
-        if (activeTab === 'chats') fetchUserChats();
-      })
+    // CORRECCIÓN: Canales con identificadores únicos y control de montaje estricto
+    const profilesChannel = supabase.channel(`profiles-feed-${Date.now()}`);
+    profilesChannel
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'profiles' },
+        () => {
+          if (isMounted && activeTab === 'users') fetchNearbyUsers();
+        }
+      )
+      .subscribe();
+
+    const messagesChannel = supabase.channel(`messages-feed-${Date.now()}`);
+    messagesChannel
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'messages' },
+        () => {
+          if (isMounted && activeTab === 'chats') fetchUserChats();
+        }
+      )
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      isMounted = false;
+      supabase.removeChannel(profilesChannel);
+      supabase.removeChannel(messagesChannel);
     };
   }, [activeTab]);
+
+  const fetchMyProfileAvatar = async () => {
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const currentUserId = authData?.user?.id;
+      if (!currentUserId) return;
+
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('avatar_url, avatar, photo_url')
+        .eq('id', currentUserId)
+        .single();
+
+      if (data && !error) {
+        const url = data.avatar_url || data.avatar || data.photo_url;
+        if (url) {
+          setMyAvatarUrl(url.trim());
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching my avatar:', err);
+    }
+  };
 
   const fetchNearbyUsers = async () => {
     setLoading(true);
@@ -155,9 +199,6 @@ export default function FeedScreen() {
       {/* CABECERA */}
       <View style={styles.headerRow}>
         <Text style={styles.title}>{activeTab === 'users' ? 'Usuarios Cerca' : 'Mis Chats'}</Text>
-        <TouchableOpacity style={styles.profileButton} onPress={() => router.push('/profile')} activeOpacity={0.8}>
-          <Text style={styles.profileButtonText}>⚙️</Text>
-        </TouchableOpacity>
       </View>
 
       {errorMessage && <Text style={styles.errorText}>Error: {errorMessage}</Text>}
@@ -165,7 +206,7 @@ export default function FeedScreen() {
       {/* CONTENIDO PRINCIPAL */}
       <View style={{ flex: 1, paddingBottom: 70 }}>
         {loading && (users.length === 0 && chats.length === 0) ? (
-          <ActivityIndicator size="large" color={Colors.primaryLight} style={{ marginTop: 20 }} />
+          <ActivityIndicator size="large" color={Colors.primary} style={{ marginTop: 20 }} />
         ) : activeTab === 'users' ? (
           <FlatList
             key="grid-3"
@@ -176,26 +217,37 @@ export default function FeedScreen() {
             ListEmptyComponent={<Text style={styles.empty}>No hay nadie cerca por ahora.</Text>}
             renderItem={({ item }) => (
               <TouchableOpacity 
-                style={styles.card}
+                style={[
+                  styles.card,
+                  item.hasUnread && styles.cardUnreadNeon
+                ]}
                 activeOpacity={0.9}
                 onPress={() => router.push({
-                  pathname: '/chat',
-                  params: { receiverId: item.id, receiverName: item.full_name || item.username }
+                  pathname: '/album',
+                  params: { userId: item.id, userName: item.full_name || item.username }
                 })}
               >
                 <Image 
-                  source={{ uri: item.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300' }} 
+                  source={{ uri: (item.avatar_url || item.avatar || item.photo_url || '').trim() || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300' }} 
                   style={styles.avatar} 
                 />
 
                 <View style={styles.indicatorsContainer}>
                   <View style={styles.onlineDot} />
-                  {item.hasUnread && <View style={styles.redDot} />}
+                  {item.hasUnread && (
+                    <Ionicons name="mail" size={13} color="#22c55e" style={styles.mailIcon} />
+                  )}
                 </View>
 
                 <View style={styles.overlay}>
                   <Text style={styles.name} numberOfLines={1}>{item.full_name || item.username}</Text>
-                  <Text style={styles.distance}>{(item.dist_meters / 1000).toFixed(1)} km</Text>
+                  <Text style={styles.distance}>
+                    {item.dist_meters != null
+                      ? item.dist_meters < 1000 
+                        ? `${Math.round(item.dist_meters)} m` 
+                        : `${(item.dist_meters / 1000).toFixed(1)} km`
+                      : 'Distancia desconocida'}
+                  </Text>
                 </View>
               </TouchableOpacity>
             )}
@@ -215,13 +267,15 @@ export default function FeedScreen() {
                 })}
               >
                 <Image 
-                  source={{ uri: item.profile?.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300' }} 
+                  source={{ uri: (item.profile?.avatar_url || item.profile?.avatar || item.profile?.photo_url || '').trim() || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300' }} 
                   style={styles.chatAvatar} 
                 />
                 <View style={styles.chatInfo}>
                   <View style={styles.chatHeaderRow}>
                     <Text style={styles.chatName}>{item.profile?.full_name || item.profile?.username || 'Usuario'}</Text>
-                    {item.hasUnread && <View style={styles.redDotLarge} />}
+                    {item.hasUnread && (
+                      <Ionicons name="mail" size={16} color="#ef4444" />
+                    )}
                   </View>
                   <Text style={styles.chatLastMessage} numberOfLines={1}>{item.lastMessage}</Text>
                 </View>
@@ -250,6 +304,18 @@ export default function FeedScreen() {
           <Text style={styles.navIcon}>💬</Text>
           <Text style={[styles.navText, activeTab === 'chats' && styles.navTextActive]}>Mis Chats</Text>
         </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={styles.navButton} 
+          onPress={() => router.push('/profile')}
+          activeOpacity={0.8}
+        >
+          <Image 
+            source={{ uri: myAvatarUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300' }} 
+            style={styles.navAvatar} 
+          />
+          <Text style={styles.navText}>Perfil</Text>
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -259,8 +325,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: 8, backgroundColor: Colors.background, paddingTop: 50 },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, paddingHorizontal: 4 },
   title: { fontSize: 22, fontWeight: 'bold', color: Colors.textPrimary },
-  profileButton: { backgroundColor: Colors.surface, padding: 8, borderRadius: 12, borderWidth: 1, borderColor: Colors.border },
-  profileButtonText: { color: Colors.textPrimary, fontWeight: 'bold', fontSize: 14 },
   
   columnWrapper: { justifyContent: 'flex-start' },
   card: {
@@ -272,7 +336,7 @@ const styles = StyleSheet.create({
     aspectRatio: 1,
     maxWidth: '31.3%',
     borderWidth: 1,
-    borderColor: Colors.border,
+    borderColor: '#262626',
     elevation: 4,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -280,16 +344,24 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     position: 'relative',
   },
+  cardUnreadNeon: {
+    borderColor: '#22c55e', 
+    borderWidth: 2.5,
+    elevation: 8,
+    shadowColor: '#22c55e',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
+  },
   avatar: { width: '100%', height: '100%', resizeMode: 'cover' },
   indicatorsContainer: { position: 'absolute', top: 6, right: 6, flexDirection: 'row', alignItems: 'center', gap: 4 },
-  onlineDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: Colors.success, borderWidth: 1.5, borderColor: Colors.background },
-  redDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: Colors.danger, borderWidth: 1.5, borderColor: Colors.background },
-  redDotLarge: { width: 10, height: 10, borderRadius: 5, backgroundColor: Colors.danger },
-  overlay: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 6, backgroundColor: 'rgba(9, 13, 22, 0.8)' },
+  onlineDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: '#22c55e', borderWidth: 1.5, borderColor: Colors.background },
+  mailIcon: { textShadowColor: 'rgba(0, 0, 0, 0.75)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
+  overlay: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 6, backgroundColor: 'rgba(5, 5, 5, 0.85)' },
   name: { fontSize: 11, fontWeight: 'bold', color: Colors.textPrimary },
   distance: { fontSize: 9, color: Colors.textSecondary, marginTop: 1, fontWeight: '600' },
 
-  chatCard: { flexDirection: 'row', backgroundColor: Colors.surface, padding: 12, borderRadius: 16, marginVertical: 4, alignItems: 'center', borderWidth: 1, borderColor: Colors.border },
+  chatCard: { flexDirection: 'row', backgroundColor: Colors.surface, padding: 12, borderRadius: 16, marginVertical: 4, alignItems: 'center', borderWidth: 1, borderColor: '#262626' },
   chatAvatar: { width: 50, height: 50, borderRadius: 25, marginRight: 12 },
   chatInfo: { flex: 1 },
   chatHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
@@ -297,12 +369,13 @@ const styles = StyleSheet.create({
   chatLastMessage: { fontSize: 13, color: Colors.textSecondary },
 
   empty: { textAlign: 'center', marginTop: 40, color: Colors.textSecondary, fontSize: 15 },
-  errorText: { color: Colors.danger, marginVertical: 10, textAlign: 'center', fontWeight: 'bold' },
+  errorText: { color: '#ef4444', marginVertical: 10, textAlign: 'center', fontWeight: 'bold' },
 
-  bottomNav: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: Colors.surface, flexDirection: 'row', borderTopWidth: 1, borderTopColor: Colors.border, justifyContent: 'space-around', alignItems: 'center', paddingBottom: 5, elevation: 10 },
+  bottomNav: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 65, backgroundColor: Colors.surface, flexDirection: 'row', borderTopWidth: 1, borderTopColor: '#262626', justifyContent: 'space-around', alignItems: 'center', paddingBottom: 5, elevation: 10 },
   navButton: { alignItems: 'center', justifyContent: 'center', flex: 1, height: '100%' },
-  navButtonActive: { borderTopWidth: 3, borderTopColor: Colors.primaryLight },
-  navIcon: { fontSize: 18 },
+  navButtonActive: { borderTopWidth: 3, borderTopColor: Colors.primary },
+  navIcon: { fontSize: 18},
+  navAvatar: { width: 22, height: 22, borderRadius: 11, marginBottom: 2, borderWidth: 1, borderColor: Colors.primary },
   navText: { fontSize: 11, color: Colors.textSecondary, fontWeight: '500', marginTop: 2 },
-  navTextActive: { color: Colors.primaryLight, fontWeight: 'bold' },
+  navTextActive: { color: Colors.primary, fontWeight: 'bold' },
 });

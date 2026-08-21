@@ -2,8 +2,20 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
-import { ActivityIndicator, Alert, KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { supabase } from '../supabase';
+import { registerForPushNotificationsAsync } from '../utils/notifications'; // <-- Importamos la función de notificaciones
+
+const Theme = {
+  background: '#0a0a0a',
+  surface: '#171717',
+  textPrimary: '#ffffff',
+  textSecondary: '#a3a3a3',
+  textMuted: '#737373',
+  primary: '#ef4444',
+  secondaryBg: '#1e1b1b',
+  border: '#292524',
+};
 
 export default function AuthScreen() {
   const router = useRouter();
@@ -11,7 +23,6 @@ export default function AuthScreen() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Función para verificar si el usuario ya completó el onboarding
   async function checkOnboardingAndRedirect(userId: string) {
     try {
       const { data: profile, error } = await supabase
@@ -30,7 +41,6 @@ export default function AuthScreen() {
     }
   }
 
-  // Función para obtener la ubicación real del celular
   async function getCurrentLocation(): Promise<{ lat: number; long: number } | null> {
     try {
       let { status } = await Location.requestForegroundPermissionsAsync();
@@ -52,7 +62,6 @@ export default function AuthScreen() {
     }
   }
 
-  // Función para Iniciar Sesión con validación estricta de errores
   async function handleSignIn() {
     if (!email.trim() || !password) {
       Alert.alert('Atención', 'Por favor ingresa correo y contraseña.');
@@ -68,22 +77,30 @@ export default function AuthScreen() {
 
       if (error) {
         let errorMessage = 'El correo electrónico no existe o la contraseña es incorrecta.';
-        
         if (!error.message.includes('Invalid login credentials') && !error.message.includes('Invalid grant')) {
           errorMessage = error.message;
         }
-
         Alert.alert('Acceso denegado', errorMessage);
       } else if (data?.user) {
+        // 1. Obtener ubicación actual
         const coords = await getCurrentLocation();
+        let pointWKT = null;
         if (coords) {
-          const pointWKT = `SRID=4326;POINT(${coords.long} ${coords.lat})`;
-          await supabase
-            .from('profiles')
-            .update({ location: pointWKT })
-            .eq('id', data.user.id);
+          pointWKT = `SRID=4326;POINT(${coords.long} ${coords.lat})`;
         }
-        
+
+        // 2. Obtener el Push Token de Notificaciones
+        const pushToken = await registerForPushNotificationsAsync();
+
+        // 3. Actualizar ubicación y token en la base de datos simultáneamente
+        await supabase
+          .from('profiles')
+          .update({ 
+            ...(pointWKT && { location: pointWKT }),
+            ...(pushToken && { expo_push_token: pushToken })
+          })
+          .eq('id', data.user.id);
+
         await checkOnboardingAndRedirect(data.user.id);
       }
     } catch (err: any) {
@@ -93,7 +110,6 @@ export default function AuthScreen() {
     }
   }
 
-  // Función para Registrarse
   async function handleSignUp() {
     if (!email.trim() || !password) {
       Alert.alert('Atención', 'Por favor ingresa correo y contraseña para registrarte.');
@@ -101,7 +117,6 @@ export default function AuthScreen() {
     }
 
     setLoading(true);
-
     try {
       const { data, error } = await supabase.auth.signUp({ 
         email: email.trim(), 
@@ -112,25 +127,26 @@ export default function AuthScreen() {
         Alert.alert('Error de registro', error.message);
       } else if (data?.user) {
         const userId = data.user.id;
-        const username = email.split('@')[0];
+        let username = email.split('@')[0];
+        if (username.length < 3) username = username + 'user';
 
         const coords = await getCurrentLocation();
         const lat = coords ? coords.lat : -20.2642;
         const long = coords ? coords.long : -70.1185;
         const pointWKT = `SRID=4326;POINT(${long} ${lat})`;
 
-        const { error: profileError } = await supabase.from('profiles').upsert({
+        // Obtener Push Token también en el registro
+        const pushToken = await registerForPushNotificationsAsync();
+
+        await supabase.from('profiles').upsert({
           id: userId,
           username: username,
           full_name: username,
           location: pointWKT,
           avatar_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100',
           onboarding_completed: false,
+          ...(pushToken && { expo_push_token: pushToken }),
         });
-
-        if (profileError) {
-          console.log('Error creando perfil:', profileError.message);
-        }
 
         Alert.alert('¡Éxito!', 'Cuenta creada correctamente.');
         router.replace('/onboarding');
@@ -142,10 +158,9 @@ export default function AuthScreen() {
     }
   }
 
-  // Función para Restablecer Contraseña
   async function handleForgotPassword() {
     if (!email.trim()) {
-      Alert.alert('Atención', 'Por favor ingresa tu correo electrónico primero para restablecer tu contraseña.');
+      Alert.alert('Atención', 'Por favor ingresa tu correo electrónico primero.');
       return;
     }
 
@@ -158,7 +173,7 @@ export default function AuthScreen() {
       if (error) {
         Alert.alert('Error', error.message);
       } else {
-        Alert.alert('Correo enviado', 'Revisa tu bandeja de entrada para restablecer tu contraseña.');
+        Alert.alert('Correo enviado', 'Revisa tu bandeja de entrada.');
       }
     } catch (err: any) {
       Alert.alert('Error inesperado', err.message);
@@ -168,27 +183,27 @@ export default function AuthScreen() {
   }
 
   return (
-    <LinearGradient colors={['#090d16', '#1e293b']} style={styles.container}>
+    <LinearGradient colors={[Theme.background, Theme.secondaryBg]} style={styles.container}>
       <KeyboardAvoidingView 
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
         style={styles.innerContainer}
       >
-        {/* LOGO Y MARCA MODERNA */}
         <View style={styles.logoContainer}>
-          <View style={styles.logoBadge}>
-            <Text style={styles.logo}>N·O·W</Text>
-          </View>
+          <Image 
+            source={require('../../assets/images/logo/logo.png')}
+            style={styles.logoImage} 
+            resizeMode="contain"
+          />
           <Text style={styles.subtitle}>Conéctate al instante ⚡</Text>
         </View>
 
-        {/* TARJETA DE FORMULARIO */}
         <View style={styles.card}>
           <Text style={styles.title}>Bienvenido</Text>
           
           <TextInput
             style={styles.input}
             placeholder="Correo electrónico"
-            placeholderTextColor="#94a3b8"
+            placeholderTextColor={Theme.textMuted}
             value={email}
             onChangeText={setEmail}
             autoCapitalize="none"
@@ -198,13 +213,12 @@ export default function AuthScreen() {
           <TextInput
             style={styles.input}
             placeholder="Contraseña"
-            placeholderTextColor="#94a3b8"
+            placeholderTextColor={Theme.textMuted}
             value={password}
             onChangeText={setPassword}
             secureTextEntry
           />
 
-          {/* Botón de Iniciar Sesión */}
           <TouchableOpacity 
             style={[styles.buttonPrimary, loading && styles.buttonDisabled]} 
             onPress={handleSignIn} 
@@ -212,13 +226,12 @@ export default function AuthScreen() {
             disabled={loading}
           >
             {loading ? (
-              <ActivityIndicator color="#fff" />
+              <ActivityIndicator color={Theme.textPrimary} />
             ) : (
               <Text style={styles.buttonText}>Iniciar Sesión</Text>
             )}
           </TouchableOpacity>
 
-          {/* Botón de Registrarse */}
           <TouchableOpacity 
             style={[styles.buttonSecondary, loading && styles.buttonDisabled]} 
             onPress={handleSignUp} 
@@ -228,7 +241,6 @@ export default function AuthScreen() {
             <Text style={styles.buttonSecondaryText}>Crear una cuenta nueva</Text>
           </TouchableOpacity>
 
-          {/* Botón de ¿Olvidaste tu contraseña? */}
           <TouchableOpacity 
             onPress={handleForgotPassword} 
             disabled={loading}
@@ -243,79 +255,62 @@ export default function AuthScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#090d16' },
+  container: { flex: 1, backgroundColor: Theme.background },
   innerContainer: { flex: 1, justifyContent: 'center', padding: 20 },
   logoContainer: { alignItems: 'center', marginBottom: 30 },
-  logoBadge: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    paddingHorizontal: 22,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(56, 189, 248, 0.3)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
+  logoImage: {
+    width: 200,
+    height: 80,
+    resizeMode: 'contain',
   },
-  logo: { 
-    fontSize: 44, 
-    fontWeight: '900', 
-    color: '#38bdf8', 
-    letterSpacing: 8,
-    textShadowColor: 'rgba(56, 189, 248, 0.4)',
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 8,
-  },
-  subtitle: { fontSize: 15, color: '#94a3b8', marginTop: 10, fontWeight: '500', letterSpacing: 0.5 },
+  subtitle: { fontSize: 15, color: Theme.textSecondary, marginTop: 14, fontWeight: '500', letterSpacing: 0.5 },
   card: { 
-    backgroundColor: '#111827', 
+    backgroundColor: Theme.surface, 
     borderRadius: 24, 
     padding: 24, 
     borderWidth: 1,
-    borderColor: '#1f2937',
+    borderColor: Theme.border,
     shadowColor: '#000', 
     shadowOffset: { width: 0, height: 10 }, 
     shadowOpacity: 0.4, 
     shadowRadius: 15, 
     elevation: 8 
   },
-  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 20, textAlign: 'center', color: '#f9fafb' },
+  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 20, textAlign: 'center', color: Theme.textPrimary },
   input: { 
-    backgroundColor: '#1f2937', 
+    backgroundColor: Theme.background, 
     paddingHorizontal: 16, 
     paddingVertical: 12, 
     borderRadius: 14, 
     marginBottom: 16, 
-    color: '#f9fafb', 
+    color: Theme.textPrimary, 
     fontSize: 16,
     borderWidth: 1,
-    borderColor: '#374151'
+    borderColor: Theme.border
   },
   buttonPrimary: { 
-    backgroundColor: '#0284c7', 
+    backgroundColor: Theme.primary, 
     padding: 16, 
     borderRadius: 14, 
     alignItems: 'center', 
     marginBottom: 12,
-    shadowColor: '#0284c7',
+    shadowColor: Theme.primary,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.4,
     shadowRadius: 6,
     elevation: 4
   },
   buttonSecondary: { 
-    backgroundColor: '#1e293b', 
+    backgroundColor: Theme.secondaryBg, 
     padding: 16, 
     borderRadius: 14, 
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#374151'
+    borderColor: Theme.border
   },
   buttonDisabled: { opacity: 0.6 },
-  buttonText: { color: '#ffffff', fontWeight: 'bold', fontSize: 16 },
-  buttonSecondaryText: { color: '#38bdf8', fontWeight: 'bold', fontSize: 16 },
+  buttonText: { color: Theme.textPrimary, fontWeight: 'bold', fontSize: 16 },
+  buttonSecondaryText: { color: '#ef4444', fontWeight: 'bold', fontSize: 16 },
   forgotContainer: { marginTop: 16, alignItems: 'center' },
-  forgotText: { color: '#94a3b8', fontSize: 14, fontWeight: '500' },
+  forgotText: { color: Theme.textSecondary, fontSize: 14, fontWeight: '500' },
 });
