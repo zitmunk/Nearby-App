@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "479257526533",
+    "project_id": "now-chat-67027",
+    "storage_bucket": "now-chat-67027.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:479257526533:android:d7184d98a39ea0eb6a376c",
+        "android_client_info": {
+          "package_name": "com.zitmunk.miappchat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBwekEuG4bG_c81ERX6LgzwqAj4L9MuVEI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
