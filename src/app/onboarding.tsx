@@ -50,10 +50,10 @@ export default function OnboardingScreen() {
   };
 
   const handleSaveProfile = async () => {
-    if (birthDate.length < 10 || !gender || lookingFor.length === 0 || preference.length === 0) {
-      Alert.alert('¡Atención!', 'Por favor completa todos los campos.');
-      return;
-    }
+   if (birthDate.length < 10 || !gender || lookingFor.length === 0 || preference.length === 0) {
+  Alert.alert('¡Atención!', 'El campo fecha de nacimiento, así podemos buscar mejores alternativas para ti ');
+  return;
+}
 
     // Convertir de DD/MM/YYYY a YYYY-MM-DD para que la base de datos tipo 'date' lo acepte
     const [day, month, year] = birthDate.split('/');

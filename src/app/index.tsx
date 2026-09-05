@@ -1,20 +1,35 @@
+import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
-import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Image, // <-- NUEVO: para mostrar el logo
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
+} from 'react-native';
 import { supabase } from '../supabase';
-import { registerForPushNotificationsAsync } from '../utils/notifications'; // <-- Importamos la función de notificaciones
+import { registerForPushNotificationsAsync } from '../utils/notifications';
 
 const Theme = {
-  background: '#0a0a0a',
-  surface: '#171717',
+  background: '#050507',
+  surface: '#121217',
+  cardBg: 'rgba(22, 22, 30, 0.85)',
   textPrimary: '#ffffff',
-  textSecondary: '#a3a3a3',
-  textMuted: '#737373',
+  textSecondary: '#a1a1aa',
+  textMuted: '#52525b',
   primary: '#ef4444',
-  secondaryBg: '#1e1b1b',
-  border: '#292524',
+  primaryDark: '#b91c1c',
+  accentYellow: '#f59e0b',
+  border: '#27272a',
 };
 
 export default function AuthScreen() {
@@ -22,6 +37,8 @@ export default function AuthScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   async function checkOnboardingAndRedirect(userId: string) {
     try {
@@ -41,11 +58,29 @@ export default function AuthScreen() {
     }
   }
 
+  // Función para limpiar el token push de otros usuarios
+  async function clearPushTokenFromOtherUsers(token: string, currentUserId: string) {
+    if (!token) return;
+    try {
+      await supabase
+        .from('profiles')
+        .update({ expo_push_token: null })
+        .eq('expo_push_token', token)
+        .neq('id', currentUserId);
+    } catch (error) {
+      console.log('Error limpiando token push de otros usuarios:', error);
+    }
+  }
+
   async function getCurrentLocation(): Promise<{ lat: number; long: number } | null> {
+    if (Platform.OS === 'web') {
+      return { lat: -20.2642, long: -70.1185 };
+    }
+
     try {
       let { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        return { lat: -20.2642, long: -70.1185 }; 
+        return { lat: -20.2642, long: -70.1185 };
       }
 
       let location = await Location.getCurrentPositionAsync({
@@ -70,9 +105,12 @@ export default function AuthScreen() {
 
     setLoading(true);
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({ 
-        email: email.trim(), 
-        password 
+      // Cerrar cualquier sesión anterior
+      await supabase.auth.signOut();
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password
       });
 
       if (error) {
@@ -82,20 +120,29 @@ export default function AuthScreen() {
         }
         Alert.alert('Acceso denegado', errorMessage);
       } else if (data?.user) {
-        // 1. Obtener ubicación actual
         const coords = await getCurrentLocation();
         let pointWKT = null;
         if (coords) {
           pointWKT = `SRID=4326;POINT(${coords.long} ${coords.lat})`;
         }
 
-        // 2. Obtener el Push Token de Notificaciones
-        const pushToken = await registerForPushNotificationsAsync();
+        let pushToken = null;
+        if (Platform.OS !== 'web') {
+          try {
+            pushToken = await registerForPushNotificationsAsync();
+          } catch (e) {
+            console.log('No se pudo obtener push token:', e);
+          }
+        }
 
-        // 3. Actualizar ubicación y token en la base de datos simultáneamente
+        // Limpiar el token de otros usuarios antes de asignarlo al nuevo
+        if (pushToken) {
+          await clearPushTokenFromOtherUsers(pushToken, data.user.id);
+        }
+
         await supabase
           .from('profiles')
-          .update({ 
+          .update({
             ...(pointWKT && { location: pointWKT }),
             ...(pushToken && { expo_push_token: pushToken })
           })
@@ -110,6 +157,29 @@ export default function AuthScreen() {
     }
   }
 
+  async function handleGoogleSignIn() {
+    setGoogleLoading(true);
+    try {
+      // Cerrar cualquier sesión anterior
+      await supabase.auth.signOut();
+
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: 'nowchat://feed',
+        },
+      });
+
+      if (error) {
+        Alert.alert('Error con Google', error.message);
+      }
+    } catch (err: any) {
+      Alert.alert('Error inesperado', err.message);
+    } finally {
+      setGoogleLoading(false);
+    }
+  }
+
   async function handleSignUp() {
     if (!email.trim() || !password) {
       Alert.alert('Atención', 'Por favor ingresa correo y contraseña para registrarte.');
@@ -118,9 +188,9 @@ export default function AuthScreen() {
 
     setLoading(true);
     try {
-      const { data, error } = await supabase.auth.signUp({ 
-        email: email.trim(), 
-        password 
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim(),
+        password
       });
 
       if (error) {
@@ -135,8 +205,19 @@ export default function AuthScreen() {
         const long = coords ? coords.long : -70.1185;
         const pointWKT = `SRID=4326;POINT(${long} ${lat})`;
 
-        // Obtener Push Token también en el registro
-        const pushToken = await registerForPushNotificationsAsync();
+        let pushToken = null;
+        if (Platform.OS !== 'web') {
+          try {
+            pushToken = await registerForPushNotificationsAsync();
+          } catch (e) {
+            console.log('No se pudo obtener push token:', e);
+          }
+        }
+
+        // Limpiar el token de otros usuarios antes de asignarlo al nuevo
+        if (pushToken) {
+          await clearPushTokenFromOtherUsers(pushToken, userId);
+        }
 
         await supabase.from('profiles').upsert({
           id: userId,
@@ -183,134 +264,290 @@ export default function AuthScreen() {
   }
 
   return (
-    <LinearGradient colors={[Theme.background, Theme.secondaryBg]} style={styles.container}>
-      <KeyboardAvoidingView 
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+    <View style={styles.container}>
+      {/* EFECTOS DE LUZ / GLOW EN EL FONDO */}
+      <View style={styles.glowTopLeft} />
+      <View style={styles.glowBottomRight} />
+
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.innerContainer}
       >
-        <View style={styles.logoContainer}>
-          <Image 
-            source={require('../../assets/images/logo/logo.png')}
-            style={styles.logoImage} 
-            resizeMode="contain"
-          />
-          <Text style={styles.subtitle}>Conéctate al instante ⚡</Text>
-        </View>
+        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
 
-        <View style={styles.card}>
-          <Text style={styles.title}>Bienvenido</Text>
-          
-          <TextInput
-            style={styles.input}
-            placeholder="Correo electrónico"
-            placeholderTextColor={Theme.textMuted}
-            value={email}
-            onChangeText={setEmail}
-            autoCapitalize="none"
-            keyboardType="email-address"
-          />
+          {/* HEADER CON BRANDING POTENTE */}
+          <View style={styles.logoContainer}>
+            <View style={styles.logoWrapper}>
+              {/* 🔥 LOGO REEMPLAZADO POR IMAGEN PNG */}
+              <Image
+              
+                source={require('../../assets/images/logo/logo.png')}  
+                style={styles.logoImage}
+                resizeMode="contain"
+              />
+            </View>
+           
+            <View style={styles.badgeTag}>
+              <Ionicons name="flash" size={12} color={Theme.accentYellow} style={{ marginRight: 4 }} />
+              <Text style={styles.badgeText}>CITAS EN TIEMPO REAL</Text>
+            </View>
+          </View>
 
-          <TextInput
-            style={styles.input}
-            placeholder="Contraseña"
-            placeholderTextColor={Theme.textMuted}
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-          />
+          {/* TARJETA MODERNA SIN BORDES RECARGADOS */}
+          <View style={styles.card}>
+            <Text style={styles.title}>Conéctate Ahora</Text>
+            <Text style={styles.cardSubtitle}>Encuentra gente cerca disponible en este momento</Text>
 
-          <TouchableOpacity 
-            style={[styles.buttonPrimary, loading && styles.buttonDisabled]} 
-            onPress={handleSignIn} 
-            activeOpacity={0.8}
-            disabled={loading}
-          >
-            {loading ? (
-              <ActivityIndicator color={Theme.textPrimary} />
-            ) : (
-              <Text style={styles.buttonText}>Iniciar Sesión</Text>
-            )}
-          </TouchableOpacity>
+            {/* INPUT EMAIL */}
+            <View style={styles.inputWrapper}>
+              <Ionicons name="mail" size={18} color={Theme.textMuted} style={styles.inputIcon} />
+              <TextInput
+                style={styles.input}
+                placeholder="Correo electrónico"
+                placeholderTextColor={Theme.textMuted}
+                value={email}
+                onChangeText={setEmail}
+                autoCapitalize="none"
+                keyboardType="email-address"
+              />
+            </View>
 
-          <TouchableOpacity 
-            style={[styles.buttonSecondary, loading && styles.buttonDisabled]} 
-            onPress={handleSignUp} 
-            activeOpacity={0.8}
-            disabled={loading}
-          >
-            <Text style={styles.buttonSecondaryText}>Crear una cuenta nueva</Text>
-          </TouchableOpacity>
+            {/* INPUT CONTRASEÑA */}
+            <View style={styles.inputWrapper}>
+              <Ionicons name="lock-closed" size={18} color={Theme.textMuted} style={styles.inputIcon} />
+              <TextInput
+                style={[styles.input, { flex: 1 }]}
+                placeholder="Contraseña"
+                placeholderTextColor={Theme.textMuted}
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry={!showPassword}
+              />
+              <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeIcon}>
+                <Ionicons name={showPassword ? "eye-off" : "eye"} size={18} color={Theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
 
-          <TouchableOpacity 
-            onPress={handleForgotPassword} 
-            disabled={loading}
-            style={styles.forgotContainer}
-          >
-            <Text style={styles.forgotText}>¿Olvidaste tu contraseña?</Text>
-          </TouchableOpacity>
-        </View>
+            <TouchableOpacity
+              onPress={handleForgotPassword}
+              disabled={loading}
+              style={styles.forgotContainer}
+            >
+              <Text style={styles.forgotText}>¿Olvidaste tu contraseña?</Text>
+            </TouchableOpacity>
+
+            {/* BOTÓN PRINCIPAL CON DEGRADADO E INTENSIDAD */}
+            <TouchableOpacity
+              style={[styles.buttonPrimaryWrapper, loading && styles.buttonDisabled]}
+              onPress={handleSignIn}
+              activeOpacity={0.88}
+              disabled={loading || googleLoading}
+            >
+              <LinearGradient
+                colors={['#f43f5e', '#ef4444', '#b91c1c']}
+                style={styles.buttonPrimary}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+              >
+                {loading ? (
+                  <ActivityIndicator color={Theme.textPrimary} />
+                ) : (
+                  <View style={styles.buttonRow}>
+                    <Text style={styles.buttonText}>Iniciar Sesión</Text>
+                    <Ionicons name="arrow-forward" size={18} color="#fff" style={{ marginLeft: 6 }} />
+                  </View>
+                )}
+              </LinearGradient>
+            </TouchableOpacity>
+
+            <View style={styles.dividerRow}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>o entra con</Text>
+              <View style={styles.dividerLine} />
+            </View>
+
+            {/* BOTÓN GOOGLE */}
+            <TouchableOpacity
+              style={[styles.googleButton, googleLoading && styles.buttonDisabled]}
+              onPress={handleGoogleSignIn}
+              activeOpacity={0.85}
+              disabled={loading || googleLoading}
+            >
+              {googleLoading ? (
+                <ActivityIndicator color="#000" />
+              ) : (
+                <View style={styles.googleButtonContent}>
+                  <Ionicons name="logo-google" size={18} color="#000" style={{ marginRight: 10 }} />
+                  <Text style={styles.googleButtonText}>Continuar con Google</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+
+            {/* BOTÓN REGISTRO */}
+            <TouchableOpacity
+              style={[styles.buttonSecondary, loading && styles.buttonDisabled]}
+              onPress={handleSignUp}
+              activeOpacity={0.8}
+              disabled={loading || googleLoading}
+            >
+              <Text style={styles.buttonSecondaryText}>¿No tienes cuenta? <Text style={styles.highlightText}>Regístrate</Text></Text>
+            </TouchableOpacity>
+
+          </View>
+
+        </ScrollView>
       </KeyboardAvoidingView>
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Theme.background },
-  innerContainer: { flex: 1, justifyContent: 'center', padding: 20 },
-  logoContainer: { alignItems: 'center', marginBottom: 30 },
+  container: {
+    flex: 1,
+    backgroundColor: Theme.background,
+    position: 'relative'
+  },
+  // ORBES DE LUZ PARA AMBIENTE NOCTURNO / DATING
+  glowTopLeft: {
+    position: 'absolute',
+    top: -80,
+    left: -80,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+  },
+  glowBottomRight: {
+    position: 'absolute',
+    bottom: -100,
+    right: -100,
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(245, 158, 11, 0.08)',
+  },
+  innerContainer: { flex: 1 },
+  scrollContent: { flexGrow: 1, justifyContent: 'center', padding: 20, paddingVertical: 40 },
+  logoContainer: { alignItems: 'center', marginBottom: 28 },
+  logoWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // 🔥 ESTILO PARA EL LOGO
   logoImage: {
-    width: 200,
-    height: 80,
+    width: 250,
+    height: 140,
     resizeMode: 'contain',
   },
-  subtitle: { fontSize: 15, color: Theme.textSecondary, marginTop: 14, fontWeight: '500', letterSpacing: 0.5 },
-  card: { 
-    backgroundColor: Theme.surface, 
-    borderRadius: 24, 
-    padding: 24, 
+  appName: {
+    fontSize: 32,
+    fontWeight: '900',
+    color: Theme.textPrimary,
+    marginTop: 4,
+    letterSpacing: -0.5,
+  },
+  badgeTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    marginTop: 8,
+  },
+  badgeText: {
+    fontSize: 10,
+    color: Theme.accentYellow,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  card: {
+    backgroundColor: Theme.cardBg,
+    borderRadius: 28,
+    padding: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.07)',
+  },
+  title: { fontSize: 24, fontWeight: '800', color: Theme.textPrimary, letterSpacing: -0.3 },
+  cardSubtitle: { fontSize: 13, color: Theme.textSecondary, marginBottom: 22, marginTop: 4 },
+  inputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Theme.surface,
+    borderRadius: 16,
+    marginBottom: 14,
     borderWidth: 1,
     borderColor: Theme.border,
-    shadowColor: '#000', 
-    shadowOffset: { width: 0, height: 10 }, 
-    shadowOpacity: 0.4, 
-    shadowRadius: 15, 
-    elevation: 8 
+    paddingHorizontal: 16,
   },
-  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 20, textAlign: 'center', color: Theme.textPrimary },
-  input: { 
-    backgroundColor: Theme.background, 
-    paddingHorizontal: 16, 
-    paddingVertical: 12, 
-    borderRadius: 14, 
-    marginBottom: 16, 
-    color: Theme.textPrimary, 
-    fontSize: 16,
-    borderWidth: 1,
-    borderColor: Theme.border
+  inputIcon: {
+    marginRight: 12,
   },
-  buttonPrimary: { 
-    backgroundColor: Theme.primary, 
-    padding: 16, 
-    borderRadius: 14, 
-    alignItems: 'center', 
-    marginBottom: 12,
-    shadowColor: Theme.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
-    elevation: 4
+  input: {
+    flex: 1,
+    paddingVertical: 15,
+    color: Theme.textPrimary,
+    fontSize: 15,
   },
-  buttonSecondary: { 
-    backgroundColor: Theme.secondaryBg, 
-    padding: 16, 
-    borderRadius: 14, 
+  eyeIcon: {
+    padding: 4,
+  },
+  forgotContainer: { alignItems: 'flex-end', marginBottom: 20, marginTop: -2 },
+  forgotText: { color: Theme.textMuted, fontSize: 12, fontWeight: '500' },
+  buttonPrimaryWrapper: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    marginBottom: 14,
+  },
+  buttonPrimary: {
+    padding: 16,
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: Theme.border
+    justifyContent: 'center',
   },
-  buttonDisabled: { opacity: 0.6 },
-  buttonText: { color: Theme.textPrimary, fontWeight: 'bold', fontSize: 16 },
-  buttonSecondaryText: { color: '#ef4444', fontWeight: 'bold', fontSize: 16 },
-  forgotContainer: { marginTop: 16, alignItems: 'center' },
-  forgotText: { color: Theme.textSecondary, fontSize: 14, fontWeight: '500' },
+  buttonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  buttonText: { color: Theme.textPrimary, fontWeight: '800', fontSize: 16, letterSpacing: 0.3 },
+  googleButton: {
+    backgroundColor: '#ffffff',
+    padding: 15,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  googleButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  googleButtonText: {
+    color: '#000000',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  buttonSecondary: {
+    padding: 12,
+    alignItems: 'center',
+  },
+  buttonSecondaryText: { color: Theme.textSecondary, fontWeight: '500', fontSize: 14 },
+  highlightText: { color: Theme.primary, fontWeight: '700' },
+  buttonDisabled: { opacity: 0.5 },
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 12,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  dividerText: {
+    color: Theme.textMuted,
+    paddingHorizontal: 12,
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+  },
 });

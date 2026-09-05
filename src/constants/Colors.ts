@@ -1,8 +1,10 @@
-// src/colors.ts (o src/constants/colors.ts)
+// src/constants/colors.ts
+
 export const Colors = {
   background: '#050505',       // Negro profundo de fondo
   surface: '#0f0f0f',          // Gris muy oscuro para headers y barras
   card: '#141414',             // Fondo de burbujas u otros elementos
+  border: '#2a2a2a',           // <--- NUEVO: Color para bordes y separadores
   borderPrimary: '#ef4444',    // Rojo pasión (para líneas y acentos fuertes)
   borderSecondary: '#facc15',  // Amarillo vibrante (para destaques)
   textPrimary: '#ffffff',      // Texto principal blanco

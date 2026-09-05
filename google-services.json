@@ -1,21 +1,21 @@
 {
   "project_info": {
-    "project_number": "479257526533",
-    "project_id": "now-chat-67027",
-    "storage_bucket": "now-chat-67027.firebasestorage.app"
+    "project_number": "811370592857",
+    "project_id": "nowchat-bf47d",
+    "storage_bucket": "nowchat-bf47d.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:479257526533:android:d7184d98a39ea0eb6a376c",
+        "mobilesdk_app_id": "1:811370592857:android:8cf838af48d4855e7f0f48",
         "android_client_info": {
-          "package_name": "com.zitmunk.miappchat"
+          "package_name": "com.nowchat"
         }
       },
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyBwekEuG4bG_c81ERX6LgzwqAj4L9MuVEI"
+          "current_key": "AIzaSyALFsDcs8FjWE-9Xfk3zF_YUxqdQCPyCFg"
         }
       ],
       "services": {

@@ -16,10 +16,13 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   BackHandler,
+  Dimensions,
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   StyleSheet,
@@ -31,7 +34,19 @@ import {
 import { Colors } from '../constants/Colors';
 import { supabase } from '../supabase';
 
+const isLoadingMore = useRef(false);
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+// 🔥 Duración de fotos efímeras (en segundos)
+const EPHEMERAL_DURATION = 10;
+
 export default function ChatScreen() {
+
+  const [photoTimer, setPhotoTimer] = useState<number | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+
   const { receiverId, receiverName } = useLocalSearchParams();
   const router = useRouter();
 
@@ -48,60 +63,68 @@ export default function ChatScreen() {
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  // ============================================================
+  // PERFIL DEL RECEPTOR
+  const [receiverAvatar, setReceiverAvatar] = useState<string | null>(null);
+  const [profileModalVisible, setProfileModalVisible] = useState(false);
+  const [receiverProfileData, setReceiverProfileData] = useState<any>(null);
+  const [receiverPhotos, setReceiverPhotos] = useState<string[]>([]);
+  const [receiverStatus, setReceiverStatus] = useState<string>('');
+
+  // DISTANCIA
+  const [userDistance, setUserDistance] = useState<string | null>(null);
+
   // AUDIO
-  // ============================================================
-
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [recordingTimer, setRecordingTimer] = useState<ReturnType<typeof setInterval> | null>(null);
+  const MAX_RECORDING_DURATION = 60;
+  const dotOpacity = useRef(new Animated.Value(1)).current;
 
-  // Player actualmente reproduciendo una nota de voz
   const audioPlayerRef = useRef<any>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
 
-  // ============================================================
-  // IMÁGENES / MODAL
-  // ============================================================
-
+  // IMÁGENES
   const [selectedImage, setSelectedImage] = useState<any>(null);
   const [modalVisible, setModalVisible] = useState(false);
 
-  // ============================================================
   // CHAT
-  // ============================================================
-
   const [isTyping, setIsTyping] = useState(false);
   const [isDisappearing, setIsDisappearing] = useState(false);
   const [isBlocked, setIsBlocked] = useState(false);
 
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const channelRef = useRef<any>(null);
-
-  // Evita que el INSERT realtime agregue dos veces el mismo mensaje
   const messageIdsRef = useRef<Set<string>>(new Set());
-
-  // Evita reproducir sonido por cada mensaje al cargar el historial
   const initialMessagesLoadedRef = useRef(false);
 
-  // ============================================================
   // AUTO SCROLL
-  // ============================================================
-
   const flatListRef = useRef<FlatList>(null);
+  const scrollOffsetRef = useRef(0);
 
   const scrollToBottom = () => {
     if (flatListRef.current && messages.length > 0) {
       setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
       }, 50);
     }
   };
 
+  // AVATAR DEL USUARIO ACTUAL
+  const [myAvatar, setMyAvatar] = useState<string | null>(null);
+
+  // LIVE LOCATION
+  const [isLiveLocationActive, setIsLiveLocationActive] = useState(false);
+  const liveLocationWatcher = useRef<Location.LocationSubscription | null>(null);
+  const liveLocationInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ACCIONES DE UBICACIÓN
+  const [selectedLocation, setSelectedLocation] = useState<any>(null);
+  const [showLocationActions, setShowLocationActions] = useState(false);
+
   // ============================================================
   // NAVEGACIÓN
   // ============================================================
-
   const handleGoBack = () => {
     router.replace('/feed');
   };
@@ -111,19 +134,91 @@ export default function ChatScreen() {
       handleGoBack();
       return true;
     };
-
-    const backHandler = BackHandler.addEventListener(
-      'hardwareBackPress',
-      backAction
-    );
-
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
     return () => backHandler.remove();
   }, []);
 
   // ============================================================
+  // PERFIL Y DISTANCIA
+  // ============================================================
+  useEffect(() => {
+    const fetchReceiverProfileAndDistance = async () => {
+      if (!receiverIdString) return;
+      try {
+        const { data: receiverProfile, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', receiverIdString)
+          .single();
+
+        if (!error && receiverProfile) {
+          setReceiverProfileData(receiverProfile);
+          if (
+            receiverProfile.avatar_url &&
+            receiverProfile.avatar_url !== 'EMPTY' &&
+            receiverProfile.avatar_url.startsWith('http')
+          ) {
+            setReceiverAvatar(receiverProfile.avatar_url);
+          } else {
+            setReceiverAvatar(null);
+          }
+          if (receiverProfile.photos && Array.isArray(receiverProfile.photos)) {
+            setReceiverPhotos(receiverProfile.photos);
+          } else if (receiverProfile.avatar_url) {
+            setReceiverPhotos([receiverProfile.avatar_url]);
+          }
+          if (receiverProfile.last_seen) {
+            const lastSeenDate = new Date(receiverProfile.last_seen);
+            const diffMinutes = Math.floor((new Date().getTime() - lastSeenDate.getTime()) / 60000);
+            if (diffMinutes < 5) {
+              setReceiverStatus('En línea ahora');
+            } else if (diffMinutes < 60) {
+              setReceiverStatus(`Activo hace ${diffMinutes} min`);
+            } else {
+              setReceiverStatus('Activo recientemente');
+            }
+          } else {
+            setReceiverStatus('Activo recientemente');
+          }
+        }
+
+        let { status } = await Location.requestForegroundPermissionsAsync();
+        let lat = -20.2642;
+        let long = -70.1185;
+        if (status === 'granted') {
+          let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+          lat = location.coords.latitude;
+          long = location.coords.longitude;
+        }
+
+        const { data: meters, error: rpcError } = await supabase.rpc('get_chat_user_distance', {
+          target_user_id: receiverIdString,
+          lat: lat,
+          long: long,
+        });
+
+        if (!rpcError && meters != null) {
+          const formattedDistance =
+            meters < 100
+              ? 'Muy cerca'
+              : meters < 1000
+                ? `${Math.round(meters)} m`
+                : `${(meters / 1000).toFixed(1)} km`;
+          setUserDistance(formattedDistance);
+        } else {
+          setUserDistance('Distancia no disponible');
+        }
+      } catch (e) {
+        console.log('Error al obtener perfil o distancia de chat:', e);
+      }
+    };
+
+    fetchReceiverProfileAndDistance();
+  }, [receiverIdString]);
+
+  // ============================================================
   // CONFIGURACIÓN DE AUDIO
   // ============================================================
-
   useEffect(() => {
     const configureAudio = async () => {
       try {
@@ -135,9 +230,7 @@ export default function ChatScreen() {
         console.log('Error configurando audio:', error);
       }
     };
-
     configureAudio();
-
     return () => {
       try {
         if (audioPlayerRef.current) {
@@ -153,25 +246,16 @@ export default function ChatScreen() {
   // ============================================================
   // GRABACIÓN DE NOTA DE VOZ
   // ============================================================
-
   const startRecording = async () => {
     if (Platform.OS === 'web') {
-      Alert.alert(
-        'No compatible',
-        'La grabación de notas de voz no está soportada directamente en la versión web.'
-      );
+      Alert.alert('No compatible', 'La grabación de notas de voz no está soportada directamente en la versión web.');
       return;
     }
 
     try {
-      const permission =
-        await AudioModule.requestRecordingPermissionsAsync();
-
+      const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
-        Alert.alert(
-          'Permiso denegado',
-          'Se necesita permiso para utilizar el micrófono.'
-        );
+        Alert.alert('Permiso denegado', 'Se necesita permiso para utilizar el micrófono.');
         return;
       }
 
@@ -184,42 +268,50 @@ export default function ChatScreen() {
       audioRecorder.record();
 
       setIsRecording(true);
+      setRecordingDuration(0);
+
+      const timer = setInterval(() => {
+        setRecordingDuration((prev) => {
+          const next = prev + 1;
+          if (next >= MAX_RECORDING_DURATION) {
+            clearInterval(timer);
+            setRecordingTimer(null);
+            stopAndSendRecording();
+            return MAX_RECORDING_DURATION;
+          }
+          return next;
+        });
+      }, 1000);
+      setRecordingTimer(timer);
+
     } catch (error: any) {
       console.error('Error al iniciar grabación:', error);
-
       setIsRecording(false);
-
-      Alert.alert(
-        'Error',
-        'No se pudo iniciar la grabación de audio.'
-      );
+      Alert.alert('Error', 'No se pudo iniciar la grabación de audio.');
     }
   };
 
   const stopAndSendRecording = async () => {
     if (!isRecording) return;
 
+    if (recordingTimer) {
+      clearInterval(recordingTimer);
+      setRecordingTimer(null);
+    }
+
     try {
       setIsRecording(false);
-
       await audioRecorder.stop();
 
       const uri = audioRecorder.uri;
-
       if (!uri) {
-        Alert.alert(
-          'Error',
-          'No se encontró el archivo de audio grabado.'
-        );
+        Alert.alert('Error', 'No se encontró el archivo de audio grabado.');
         return;
       }
 
       setUploading(true);
 
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
+      const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
         Alert.alert('Error', 'No se encontró el usuario actual.');
         return;
@@ -237,52 +329,49 @@ export default function ChatScreen() {
           upsert: false,
         });
 
-      if (uploadError) {
-        throw uploadError;
-      }
+      if (uploadError) throw uploadError;
 
-      const {
-        data: { publicUrl },
-      } = supabase.storage
+      const { data: { publicUrl } } = supabase.storage
         .from('chat-images')
         .getPublicUrl(fileName);
 
-      await sendMessage(
-        null,
-        `🎤 [Nota de voz]\n${publicUrl}`
-      );
+      await sendMessage(null, `🎤 [Nota de voz]\n${publicUrl}`);
+
+      setRecordingDuration(0);
     } catch (error: any) {
       console.error('Error enviando audio:', error);
-
-      Alert.alert(
-        'Error',
-        'No se pudo enviar el audio: ' +
-          (error?.message || 'Error desconocido')
-      );
+      Alert.alert('Error', 'No se pudo enviar el audio: ' + (error?.message || 'Error desconocido'));
     } finally {
       setUploading(false);
       setIsRecording(false);
     }
   };
 
-  // ============================================================
-  // DETECTAR NOTA DE VOZ
-  // ============================================================
+  const cancelRecording = async () => {
+    if (recordingTimer) {
+      clearInterval(recordingTimer);
+      setRecordingTimer(null);
+    }
+    setIsRecording(false);
+    setRecordingDuration(0);
+    try {
+      await audioRecorder.stop();
+    } catch (error) {
+      console.log('Error al detener grabación cancelada:', error);
+    }
+  };
 
+  // ============================================================
+  // DETECTAR NOTA DE VOZ Y UBICACIÓN
+  // ============================================================
   const getAudioUrlFromMessage = (item: any): string | null => {
     if (!item?.content) return null;
-
-    if (
-      typeof item.content === 'string' &&
-      item.content.startsWith('🎤 [Nota de voz]')
-    ) {
+    if (typeof item.content === 'string' && item.content.startsWith('🎤 [Nota de voz]')) {
       const parts = item.content.split('\n');
-
       if (parts.length > 1 && parts[1]) {
         return parts[1].trim();
       }
     }
-
     return null;
   };
 
@@ -290,39 +379,50 @@ export default function ChatScreen() {
     return getAudioUrlFromMessage(item) !== null;
   };
 
+  const isLocationMessage = (item: any): boolean => {
+    if (!item?.content) return false;
+    return typeof item.content === 'string' && (item.content.startsWith('📍') || item.content.includes('[Ubicación compartida]'));
+  };
+
+  const getLocationData = (item: any) => {
+    try {
+      const lines = item.content.split('\n');
+      if (lines.length > 1) {
+        const data = JSON.parse(lines[1]);
+        if (data.lat && data.lng) return data;
+      }
+      const urlMatch = item.content.match(/q=(-?\d+\.\d+),(-?\d+\.\d+)/);
+      if (urlMatch) {
+        return { lat: parseFloat(urlMatch[1]), lng: parseFloat(urlMatch[2]) };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const isLiveLocation = (item: any): boolean => {
+    const data = getLocationData(item);
+    return data && data.isLive === true;
+  };
+
   // ============================================================
   // REPRODUCIR NOTA DE VOZ
   // ============================================================
-
   const playVoiceMessage = async (item: any) => {
     const audioUrl = getAudioUrlFromMessage(item);
-
     if (!audioUrl) {
-      Alert.alert(
-        'Audio',
-        'No se encontró la dirección del archivo de audio.'
-      );
+      Alert.alert('Audio', 'No se encontró la dirección del archivo de audio.');
       return;
     }
-
     try {
-      // Si tocamos el mismo audio que está reproduciéndose,
-      // lo detenemos.
-      if (
-        playingAudioId === item.id &&
-        audioPlayerRef.current
-      ) {
+      if (playingAudioId === item.id && audioPlayerRef.current) {
         audioPlayerRef.current.pause();
-
         audioPlayerRef.current.remove();
         audioPlayerRef.current = null;
-
         setPlayingAudioId(null);
-
         return;
       }
-
-      // Liberar reproductor anterior
       if (audioPlayerRef.current) {
         try {
           audioPlayerRef.current.pause();
@@ -330,110 +430,61 @@ export default function ChatScreen() {
         } catch (error) {
           console.log('Error liberando audio anterior:', error);
         }
-
         audioPlayerRef.current = null;
       }
-
       await setAudioModeAsync({
         allowsRecording: false,
         playsInSilentMode: true,
       });
-
       const player = createAudioPlayer(audioUrl);
-
       audioPlayerRef.current = player;
       setPlayingAudioId(item.id);
-
-      // Escuchar cambios de reproducción para saber cuándo terminó
-      const subscription = player.addListener(
-        'playbackStatusUpdate',
-        (status: any) => {
-          if (status?.didJustFinish) {
-            try {
-              subscription.remove();
-            } catch {}
-
-            try {
-              player.remove();
-            } catch {}
-
-            if (audioPlayerRef.current === player) {
-              audioPlayerRef.current = null;
-            }
-
-            setPlayingAudioId(null);
+      const subscription = player.addListener('playbackStatusUpdate', (status: any) => {
+        if (status?.didJustFinish) {
+          try { subscription.remove(); } catch {}
+          try { player.remove(); } catch {}
+          if (audioPlayerRef.current === player) {
+            audioPlayerRef.current = null;
           }
+          setPlayingAudioId(null);
         }
-      );
-
+      });
       player.play();
     } catch (error: any) {
       console.error('Error reproduciendo audio:', error);
-
       setPlayingAudioId(null);
-
       if (audioPlayerRef.current) {
-        try {
-          audioPlayerRef.current.remove();
-        } catch {}
-
+        try { audioPlayerRef.current.remove(); } catch {}
         audioPlayerRef.current = null;
       }
-
-      Alert.alert(
-        'Error',
-        'No se pudo reproducir la nota de voz.'
-      );
+      Alert.alert('Error', 'No se pudo reproducir la nota de voz.');
     }
   };
 
   // ============================================================
   // SONIDO DE NOTIFICACIÓN
   // ============================================================
-
   async function playNotificationSound() {
     try {
       if (Platform.OS === 'web') return;
-
       const soundModule = require('../assets/notification.mp3');
-
       if (!soundModule) return;
-
       const player = createAudioPlayer(soundModule);
-
       player.play();
-
       setTimeout(() => {
-        try {
-          player.remove();
-        } catch {}
+        try { player.remove(); } catch {}
       }, 3000);
     } catch (error) {
-      // El sonido es opcional.
-      // Si no existe notification.mp3 no rompemos el chat.
       console.log('Sonido de notificación no disponible.');
     }
   }
 
-  // ============================================================
-  // SONIDO CUANDO LLEGA UN MENSAJE NUEVO
-  // ============================================================
-
   useEffect(() => {
     scrollToBottom();
-
-    if (!initialMessagesLoadedRef.current) {
-      return;
-    }
-
-    if (!messages || messages.length === 0) {
-      return;
-    }
-
+    if (!initialMessagesLoadedRef.current) return;
+    if (!messages || messages.length === 0) return;
     const lastMessage = messages[messages.length - 1];
-
     if (!lastMessage) return;
-
     if (
       lastMessage.receiver_id === currentUserId &&
       lastMessage.sender_id !== currentUserId
@@ -445,28 +496,19 @@ export default function ChatScreen() {
   // ============================================================
   // PROTECCIÓN DE CAPTURAS
   // ============================================================
-
   useEffect(() => {
     const setupScreenProtection = async () => {
       if (Platform.OS === 'web') return;
-
       try {
-        const isAvailable =
-          await ScreenCapture.isAvailableAsync();
-
+        const isAvailable = await ScreenCapture.isAvailableAsync();
         if (isAvailable) {
           await ScreenCapture.preventScreenCaptureAsync();
         }
       } catch (error) {
-        console.log(
-          'Error activando protección de pantalla:',
-          error
-        );
+        console.log('Error activando protección de pantalla:', error);
       }
     };
-
     setupScreenProtection();
-
     return () => {
       if (Platform.OS !== 'web') {
         ScreenCapture.allowScreenCaptureAsync();
@@ -475,12 +517,12 @@ export default function ChatScreen() {
   }, [receiverIdString]);
 
   // ============================================================
-  // BLOQUEAR USUARIO
+  // BLOQUEO / DESBLOQUEO
   // ============================================================
-
   const handleBlockUser = async () => {
-    if (!currentUserId || !receiverIdString) return;
-
+    const { data: authData } = await supabase.auth.getUser();
+    const activeUserId = authData?.user?.id || currentUserId;
+    if (!activeUserId || !receiverIdString) return;
     Alert.alert(
       'Bloquear usuario',
       '¿Estás seguro de que quieres bloquear a este usuario?',
@@ -496,27 +538,17 @@ export default function ChatScreen() {
             const { error } = await supabase
               .from('blocks')
               .insert({
-                blocker_id: currentUserId,
+                blocker_id: activeUserId,
                 blocked_id: receiverIdString,
               });
-
             if (error) {
-              // Si ya existe el bloqueo
               if (error.code === '23505') {
                 setIsBlocked(true);
                 return;
               }
-
-              Alert.alert(
-                'Error',
-                'No se pudo bloquear al usuario.'
-              );
+              Alert.alert('Error', 'No se pudo bloquear al usuario: ' + error.message);
             } else {
-              Alert.alert(
-                'Bloqueado',
-                'Usuario bloqueado correctamente.'
-              );
-
+              Alert.alert('Bloqueado', 'Usuario bloqueado correctamente.');
               setIsBlocked(true);
             }
           },
@@ -525,13 +557,8 @@ export default function ChatScreen() {
     );
   };
 
-  // ============================================================
-  // DESBLOQUEAR
-  // ============================================================
-
   const handleUnblockUser = async () => {
     if (!currentUserId || !receiverIdString) return;
-
     Alert.alert(
       'Desbloquear usuario',
       '¿Quieres desbloquear a este usuario?',
@@ -549,20 +576,11 @@ export default function ChatScreen() {
               .or(
                 `and(blocker_id.eq.${currentUserId},blocked_id.eq.${receiverIdString}),and(blocker_id.eq.${receiverIdString},blocked_id.eq.${currentUserId})`
               );
-
             if (error) {
-              Alert.alert(
-                'Error',
-                'No se pudo desbloquear al usuario.'
-              );
+              Alert.alert('Error', 'No se pudo desbloquear al usuario.');
             } else {
-              Alert.alert(
-                'Desbloqueado',
-                'Has desbloqueado a este usuario.'
-              );
-
+              Alert.alert('Desbloqueado', 'Has desbloqueado a este usuario.');
               setIsBlocked(false);
-
               if (currentUserId) {
                 await fetchMessages(currentUserId);
               }
@@ -573,110 +591,198 @@ export default function ChatScreen() {
     );
   };
 
-  // ============================================================
-  // COMPROBAR BLOQUEO
-  // ============================================================
-
   const checkBlockStatus = async (userId: string) => {
     if (!receiverIdString) return;
-
     const { data, error } = await supabase
       .from('blocks')
       .select('*')
       .or(
         `and(blocker_id.eq.${userId},blocked_id.eq.${receiverIdString}),and(blocker_id.eq.${receiverIdString},blocked_id.eq.${userId})`
       );
-
     if (error) {
-      console.log(
-        'Error comprobando bloqueo:',
-        error.message
-      );
-
+      console.log('Error comprobando bloqueo:', error.message);
       setIsBlocked(false);
       return;
     }
-
     setIsBlocked(Boolean(data && data.length > 0));
   };
 
-  // ============================================================
-  // MARCAR MENSAJES COMO LEÍDOS
-  // ============================================================
-
   const markMessagesAsRead = async (userId: string) => {
-    if (!receiverIdString) return;
-
-    await supabase
-      .from('messages')
-      .update({ is_read: true })
-      .eq('sender_id', receiverIdString)
-      .eq('receiver_id', userId)
-      .eq('is_read', false);
+    if (!receiverIdString || !userId) return;
+    try {
+      const { data: unreadMessages, error: fetchError } = await supabase
+        .from('messages')
+        .select('id')
+        .eq('sender_id', receiverIdString)
+        .eq('receiver_id', userId)
+        .eq('is_read', false);
+      if (fetchError || !unreadMessages || unreadMessages.length === 0) return;
+      const messageIds = unreadMessages.map((m) => m.id);
+      const { error: updateError } = await supabase
+        .from('messages')
+        .update({ is_read: true })
+        .in('id', messageIds);
+      if (updateError) {
+        console.log('Error al actualizar mensajes a leídos:', updateError.message);
+      }
+    } catch (err) {
+      console.log('Excepción en markMessagesAsRead:', err);
+    }
   };
 
   // ============================================================
   // CARGAR MENSAJES
   // ============================================================
-
   const fetchMessages = async (userId: string) => {
     if (!receiverIdString) return;
-
     const { data, error } = await supabase
       .from('messages')
       .select('*')
       .or(
         `and(sender_id.eq.${userId},receiver_id.eq.${receiverIdString}),and(sender_id.eq.${receiverIdString},receiver_id.eq.${userId})`
       )
-      .order('created_at', {
-        ascending: true,
-      });
+      .order('created_at', { ascending: false })
+      .limit(15);
 
     if (error) {
-      console.error(
-        'Error cargando mensajes:',
-        error.message
-      );
+      console.error('Error cargando mensajes:', error.message);
       return;
     }
 
     if (data) {
-      setMessages(data);
+      const now = new Date().getTime();
+      const processedMessages = data.map((msg) => {
+        if (msg.is_disappearing && msg.image_url) {
+          const createdAtTime = new Date(msg.created_at).getTime();
+          const hasExpiredTime = now - createdAtTime > 24 * 60 * 60 * 1000;
+          if (msg.viewed || hasExpiredTime) {
+            return {
+              ...msg,
+              viewed: true,
+              image_url: null,
+              content: hasExpiredTime && !msg.viewed
+                ? '🔥 [Foto expirada por inactividad]'
+                : '🔥 [Foto vista y expirada]',
+            };
+          }
+        }
+        return msg;
+      });
 
+      setMessages(processedMessages);
       messageIdsRef.current.clear();
-
-      data.forEach((message) => {
+      processedMessages.forEach((message) => {
         if (message.id) {
           messageIdsRef.current.add(message.id);
         }
       });
-
-      // Muy importante:
-      // El historial ya está cargado.
-      // A partir de aquí sí debemos avisar de mensajes nuevos.
       initialMessagesLoadedRef.current = true;
+    }
+  };
+
+  const loadMoreMessages = async (userId: string) => {
+    if (!receiverIdString || messages.length === 0) return;
+    if (isLoadingMore.current) return;
+    isLoadingMore.current = true;
+
+    const currentOffset = scrollOffsetRef.current;
+
+    try {
+      const oldestMessage = messages[messages.length - 1];
+      const oldestDate = oldestMessage?.created_at;
+      if (!oldestDate) {
+        isLoadingMore.current = false;
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .or(
+          `and(sender_id.eq.${userId},receiver_id.eq.${receiverIdString}),and(sender_id.eq.${receiverIdString},receiver_id.eq.${userId})`
+        )
+        .lt('created_at', oldestDate)
+        .order('created_at', { ascending: false })
+        .limit(15);
+
+      if (error) {
+        console.error('Error cargando más mensajes:', error.message);
+        isLoadingMore.current = false;
+        return;
+      }
+
+      if (data && data.length > 0) {
+        const now = new Date().getTime();
+        const processedOlderMessages = data.map((msg) => {
+          if (msg.is_disappearing && msg.image_url) {
+            const createdAtTime = new Date(msg.created_at).getTime();
+            const hasExpiredTime = now - createdAtTime > 24 * 60 * 60 * 1000;
+            if (msg.viewed || hasExpiredTime) {
+              return {
+                ...msg,
+                viewed: true,
+                image_url: null,
+                content: hasExpiredTime && !msg.viewed
+                  ? '🔥 [Foto expirada por inactividad]'
+                  : '🔥 [Foto vista y expirada]',
+              };
+            }
+          }
+          return msg;
+        });
+
+        setMessages((prevMessages) => {
+          const existingIds = new Set(prevMessages.map((m) => m.id));
+          const uniqueNewMessages = processedOlderMessages.filter((m) => !existingIds.has(m.id));
+          return [...prevMessages, ...uniqueNewMessages];
+        });
+
+        processedOlderMessages.forEach((message) => {
+          if (message.id) {
+            messageIdsRef.current.add(message.id);
+          }
+        });
+
+        setTimeout(() => {
+          if (flatListRef.current) {
+            flatListRef.current?.scrollToOffset({ offset: currentOffset, animated: false });
+          }
+        }, 50);
+      }
+    } catch (err) {
+      console.error('Error inesperado en loadMoreMessages:', err);
+    } finally {
+      isLoadingMore.current = false;
     }
   };
 
   // ============================================================
   // CONFIGURACIÓN REALTIME
   // ============================================================
-
   useEffect(() => {
     let isMounted = true;
 
     const setupChat = async () => {
       if (!receiverIdString) return;
-
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
+      const { data: { user } } = await supabase.auth.getUser();
       if (!user || !isMounted) return;
 
       const userId = user.id;
-
       setCurrentUserId(userId);
+
+      const { data: profileData } = await supabase
+        .from('profiles')
+        .select('avatar_url')
+        .eq('id', userId)
+        .single();
+      if (profileData?.avatar_url) {
+        setMyAvatar(profileData.avatar_url.trim());
+      }
+
+      await supabase
+        .from('profiles')
+        .update({ last_seen: new Date().toISOString() })
+        .eq('id', userId);
 
       await checkBlockStatus(userId);
       await fetchMessages(userId);
@@ -685,16 +791,8 @@ export default function ChatScreen() {
       if (!isMounted) return;
 
       const sortedIds = [userId, receiverIdString].sort();
-
-      /*
-       * NO usamos Date.now() aquí.
-       *
-       * Ambos dispositivos necesitan poder entrar
-       * al mismo canal para typing/broadcast.
-       */
       const roomName = `room_${sortedIds[0]}_${sortedIds[1]}`;
 
-      // Si existía un canal anterior, eliminarlo
       if (channelRef.current) {
         try {
           await supabase.removeChannel(channelRef.current);
@@ -710,10 +808,6 @@ export default function ChatScreen() {
         },
       });
 
-      // ========================================================
-      // INSERT DE MENSAJES
-      // ========================================================
-
       channel.on(
         'postgres_changes',
         {
@@ -723,41 +817,23 @@ export default function ChatScreen() {
         },
         (payload: any) => {
           if (!isMounted) return;
-
           const newMsg = payload.new;
-
           if (!newMsg?.id) return;
 
           const belongsToConversation =
-            (newMsg.sender_id === userId &&
-              newMsg.receiver_id === receiverIdString) ||
-            (newMsg.sender_id === receiverIdString &&
-              newMsg.receiver_id === userId);
-
+            (newMsg.sender_id === userId && newMsg.receiver_id === receiverIdString) ||
+            (newMsg.sender_id === receiverIdString && newMsg.receiver_id === userId);
           if (!belongsToConversation) return;
-
-          /*
-           * Evitar duplicados.
-           */
-          if (messageIdsRef.current.has(newMsg.id)) {
-            return;
-          }
+          if (messageIdsRef.current.has(newMsg.id)) return;
 
           messageIdsRef.current.add(newMsg.id);
+          setMessages((prev) => [newMsg, ...prev]);
 
-          setMessages((prev) => [...prev, newMsg]);
-
-          // Si recibimos mensaje del otro usuario,
-          // marcarlo inmediatamente como leído.
           if (newMsg.sender_id === receiverIdString) {
             markMessagesAsRead(userId);
           }
         }
       );
-
-      // ========================================================
-      // UPDATE DE MENSAJES
-      // ========================================================
 
       channel.on(
         'postgres_changes',
@@ -768,34 +844,22 @@ export default function ChatScreen() {
         },
         (payload: any) => {
           if (!isMounted) return;
-
           const updatedMsg = payload.new;
-
           if (!updatedMsg?.id) return;
 
           const belongsToConversation =
-            (updatedMsg.sender_id === userId &&
-              updatedMsg.receiver_id === receiverIdString) ||
-            (updatedMsg.sender_id === receiverIdString &&
-              updatedMsg.receiver_id === userId);
-
+            (updatedMsg.sender_id === userId && updatedMsg.receiver_id === receiverIdString) ||
+            (updatedMsg.sender_id === receiverIdString && updatedMsg.receiver_id === userId);
           if (!belongsToConversation) return;
 
           messageIdsRef.current.add(updatedMsg.id);
-
           setMessages((prev) =>
             prev.map((message) =>
-              message.id === updatedMsg.id
-                ? updatedMsg
-                : message
+              message.id === updatedMsg.id ? updatedMsg : message
             )
           );
         }
       );
-
-      // ========================================================
-      // TYPING
-      // ========================================================
 
       channel.on(
         'broadcast',
@@ -804,33 +868,15 @@ export default function ChatScreen() {
         },
         (payload: any) => {
           if (!isMounted) return;
-
-          if (
-            payload?.payload?.userId === receiverIdString
-          ) {
-            setIsTyping(
-              Boolean(payload?.payload?.isTyping)
-            );
+          if (payload?.payload?.userId === receiverIdString) {
+            setIsTyping(Boolean(payload?.payload?.isTyping));
           }
         }
       );
 
-      // ========================================================
-      // SUSCRIBIR
-      // ========================================================
-
       channel.subscribe((status: string) => {
         if (status === 'SUBSCRIBED') {
-          console.log(
-            'Chat realtime conectado:',
-            roomName
-          );
-        }
-
-        if (status === 'CHANNEL_ERROR') {
-          console.log(
-            'Error en canal realtime del chat.'
-          );
+          console.log('Chat realtime conectado:', roomName);
         }
       });
 
@@ -841,19 +887,16 @@ export default function ChatScreen() {
 
     return () => {
       isMounted = false;
-
+      stopLiveLocation();
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
         typingTimeoutRef.current = null;
       }
-
       setIsTyping(false);
-
       if (channelRef.current) {
         supabase.removeChannel(channelRef.current);
         channelRef.current = null;
       }
-
       messageIdsRef.current.clear();
       initialMessagesLoadedRef.current = false;
     };
@@ -862,12 +905,9 @@ export default function ChatScreen() {
   // ============================================================
   // TYPING
   // ============================================================
-
   const handleTextChange = (text: string) => {
     setInputText(text);
-
     if (!channelRef.current || !currentUserId) return;
-
     channelRef.current.send({
       type: 'broadcast',
       event: 'typing',
@@ -876,20 +916,12 @@ export default function ChatScreen() {
         isTyping: text.trim().length > 0,
       },
     });
-
     if (typingTimeoutRef.current) {
       clearTimeout(typingTimeoutRef.current);
     }
-
-    if (text.trim().length === 0) {
-      return;
-    }
-
+    if (text.trim().length === 0) return;
     typingTimeoutRef.current = setTimeout(() => {
-      if (
-        channelRef.current &&
-        currentUserId
-      ) {
+      if (channelRef.current && currentUserId) {
         channelRef.current.send({
           type: 'broadcast',
           event: 'typing',
@@ -902,35 +934,26 @@ export default function ChatScreen() {
     }, 2000);
   };
 
-  
-
   // ============================================================
   // ENVIAR MENSAJE
   // ============================================================
-
   const sendMessage = async (
     imageUrl: string | null = null,
     customContent: string | null = null
   ) => {
-    const textToSend =
-      customContent !== null
-        ? customContent
-        : inputText.trim();
+    const textToSend = customContent !== null ? customContent : inputText.trim();
+    if ((!textToSend && !imageUrl) || !currentUserId || !receiverIdString) return;
 
-    if (
-      (!textToSend && !imageUrl) ||
-      !currentUserId ||
-      !receiverIdString
-    ) {
-      return;
-    }
+    await supabase
+      .from('profiles')
+      .update({ last_seen: new Date().toISOString() })
+      .eq('id', currentUserId);
 
     if (channelRef.current && currentUserId) {
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
         typingTimeoutRef.current = null;
       }
-
       channelRef.current.send({
         type: 'broadcast',
         event: 'typing',
@@ -946,14 +969,9 @@ export default function ChatScreen() {
     }
 
     let content = textToSend;
-
-    // Si hay una imagen, formateamos el texto como foto temporal.
-    // Si es un audio u otro customContent, se respeta el textToSend (que ya trae el formato correcto).
     if (imageUrl) {
-      content = '🔥 [Foto Temporal]';
+      content = '📸 [Foto Temporal]';
     }
-
-    // El modo temporal (is_disappearing) aplica exclusivamente si se envía una imagen
     const disappearing = imageUrl ? true : false;
 
     const { data, error } = await supabase
@@ -971,896 +989,826 @@ export default function ChatScreen() {
       .single();
 
     if (error) {
-      Alert.alert(
-        'Error',
-        error.message
-      );
+      Alert.alert('Error', error.message);
       return;
     }
 
-    /*
-     * Si Supabase Realtime tarda o no está disponible,
-     * mostramos inmediatamente nuestro propio mensaje.
-     *
-     * El Set evita que posteriormente realtime
-     * lo agregue de nuevo.
-     */
     if (data?.id) {
       messageIdsRef.current.add(data.id);
-
       setMessages((prev) => {
-        const alreadyExists = prev.some(
-          (message) => message.id === data.id
-        );
-
-        if (alreadyExists) {
-          return prev;
-        }
-
-        return [...prev, data];
+        const alreadyExists = prev.some((message) => message.id === data.id);
+        if (alreadyExists) return prev;
+        return [data, ...prev];
       });
     }
-
     setIsDisappearing(false);
   };
 
   // ============================================================
   // ENVIAR UBICACIÓN
   // ============================================================
-
   const handleSendLocation = async () => {
     try {
-      const { status } =
-        await Location.requestForegroundPermissionsAsync();
-
+      const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert(
-          'Permiso denegado',
-          'Se requieren permisos de ubicación para enviar tu posición.'
-        );
+        Alert.alert('Permiso denegado', 'Se requieren permisos de ubicación para enviar tu posición.');
         return;
       }
 
-      const location =
-        await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const { latitude, longitude } = location.coords;
+
+      let formattedAddress = '';
+      try {
+        const [address] = await Location.reverseGeocodeAsync({
+          latitude,
+          longitude,
         });
+        const addressParts = [];
+        if (address?.street) addressParts.push(address.street);
+        if (address?.streetNumber) addressParts.push(address.streetNumber);
+        if (address?.city) addressParts.push(address.city);
+        if (address?.country) addressParts.push(address.country);
+        formattedAddress = addressParts.length > 0
+          ? addressParts.join(', ')
+          : `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+      } catch (e) {
+        formattedAddress = `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+      }
 
-      const {
-        latitude,
-        longitude,
-      } = location.coords;
+      const locationData = {
+        lat: latitude,
+        lng: longitude,
+        address: formattedAddress,
+        isLive: false,
+      };
 
-      const mapsLink =
-        `https://www.google.com/maps?q=${latitude},${longitude}`;
+      const locationMessage = `📍 ${formattedAddress}\n${JSON.stringify(locationData)}`;
 
-      const locationMessage =
-        `📍 [Ubicación compartida]\n${mapsLink}`;
-
-      await sendMessage(
-        null,
-        locationMessage
-      );
+      await sendMessage(null, locationMessage);
     } catch (error) {
-      console.error(
-        'Error GPS:',
-        error
-      );
-
-      Alert.alert(
-        'Error',
-        'No se pudo obtener la ubicación actual.'
-      );
+      console.error('Error GPS:', error);
+      Alert.alert('Error', 'No se pudo obtener la ubicación actual.');
     }
   };
 
-
-
   // ============================================================
-  // SELECCIONAR Y ENVIAR IMAGEN (COMPRIMIDA)
+  // LIVE LOCATION
   // ============================================================
-
-  const pickAndSendImage = async () => {
+  const startLiveLocation = async () => {
     try {
-      const permissionResult =
-        await ImagePicker.requestMediaLibraryPermissionsAsync();
-
-      if (permissionResult.status !== 'granted') {
-        Alert.alert(
-          'Permiso denegado',
-          'Se necesita acceso a la galería.'
-        );
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permiso denegado', 'Se necesitan permisos de ubicación.');
         return;
       }
 
-      const result =
-        await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ['images'],
-          allowsEditing: true,
-          quality: 1,
-        });
+      setIsLiveLocationActive(true);
 
-      if (result.canceled) return;
+      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      await sendLiveLocationMessage(location.coords.latitude, location.coords.longitude);
 
-      setUploading(true);
-
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
-        Alert.alert(
-          'Error',
-          'No se encontró el usuario actual.'
-        );
-        return;
-      }
-
-      const imageUri = result.assets[0].uri;
-
-      // ==========================================
-      // COMPRIMIR Y REDIMENSIONAR IMAGEN ANTES DE SUBIR
-      // ==========================================
-      const manipResult = await ImageManipulator.manipulateAsync(
-        imageUri,
-        [{ resize: { width: 1000 } }], // Ancho máximo de 1000px manteniendo proporción
-        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG } // Calidad al 70% en JPEG
+      liveLocationWatcher.current = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.High,
+          timeInterval: 10000,
+          distanceInterval: 10,
+        },
+        async (newLocation) => {
+          await sendLiveLocationMessage(newLocation.coords.latitude, newLocation.coords.longitude);
+        }
       );
 
+      liveLocationInterval.current = setInterval(async () => {
+        if (!isLiveLocationActive) return;
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        await sendLiveLocationMessage(loc.coords.latitude, loc.coords.longitude);
+      }, 10000);
+
+      Alert.alert('Ubicación en vivo', 'Ahora estás compartiendo tu ubicación en tiempo real.');
+    } catch (error) {
+      console.error('Error iniciando live location:', error);
+      Alert.alert('Error', 'No se pudo iniciar la ubicación en vivo.');
+      setIsLiveLocationActive(false);
+    }
+  };
+
+  const sendLiveLocationMessage = async (lat: number, lng: number) => {
+    try {
+      let formattedAddress = '';
+      try {
+        const [address] = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
+        const addressParts = [];
+        if (address?.street) addressParts.push(address.street);
+        if (address?.streetNumber) addressParts.push(address.streetNumber);
+        if (address?.city) addressParts.push(address.city);
+        if (address?.country) addressParts.push(address.country);
+        formattedAddress = addressParts.length > 0
+          ? addressParts.join(', ')
+          : `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+      } catch (e) {
+        formattedAddress = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+      }
+
+      const locationData = {
+        lat,
+        lng,
+        address: formattedAddress,
+        isLive: true,
+        timestamp: Date.now(),
+      };
+
+      const content = `📍 [Ubicación en vivo]\n${JSON.stringify(locationData)}`;
+      await sendMessage(null, content);
+    } catch (error) {
+      console.error('Error enviando live location:', error);
+    }
+  };
+
+  const stopLiveLocation = async () => {
+    setIsLiveLocationActive(false);
+    if (liveLocationWatcher.current) {
+      liveLocationWatcher.current.remove();
+      liveLocationWatcher.current = null;
+    }
+    if (liveLocationInterval.current) {
+      clearInterval(liveLocationInterval.current);
+      liveLocationInterval.current = null;
+    }
+    Alert.alert('Ubicación en vivo', 'Has dejado de compartir tu ubicación.');
+  };
+
+  // ============================================================
+  // ACCIONES DE UBICACIÓN
+  // ============================================================
+  const openLocationActions = (locationData: any) => {
+    setSelectedLocation(locationData);
+    setShowLocationActions(true);
+  };
+
+  const handleLocationAction = async (action: string) => {
+    if (!selectedLocation) return;
+    setShowLocationActions(false);
+
+    switch (action) {
+      case 'estoy_aqui':
+        await handleSendLocation();
+        break;
+      case 'como_llegar':
+        try {
+          const { status } = await Location.requestForegroundPermissionsAsync();
+          if (status === 'granted') {
+            const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+            const url = `https://www.google.com/maps/dir/?api=1&origin=${loc.coords.latitude},${loc.coords.longitude}&destination=${selectedLocation.lat},${selectedLocation.lng}`;
+            Linking.openURL(url);
+          } else {
+            const url = `https://www.google.com/maps?q=${selectedLocation.lat},${selectedLocation.lng}`;
+            Linking.openURL(url);
+          }
+        } catch (error) {
+          const url = `https://www.google.com/maps?q=${selectedLocation.lat},${selectedLocation.lng}`;
+          Linking.openURL(url);
+        }
+        break;
+      case 'compartir_mi_ubicacion':
+        await handleSendLocation();
+        break;
+      default:
+        break;
+    }
+  };
+
+  // ============================================================
+  // SELECCIONAR Y ENVIAR IMAGEN
+  // ============================================================
+  const pickAndSendImage = async () => {
+    try {
+      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (permissionResult.status !== 'granted') {
+        Alert.alert('Permiso denegado', 'Se necesita acceso a la galería.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: false,
+        quality: 1,
+      });
+      if (result.canceled) return;
+      setUploading(true);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        Alert.alert('Error', 'No se encontró el usuario actual.');
+        return;
+      }
+      const imageUri = result.assets[0].uri;
+      const manipResult = await ImageManipulator.manipulateAsync(
+        imageUri,
+        [{ resize: { width: 1000 } }],
+        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG }
+      );
       const finalUri = manipResult.uri;
       const fileName = `chat_${user.id}_${Date.now()}.jpg`;
-
       const response = await fetch(finalUri);
       const blob = await response.blob();
-
-      const {
-        error: uploadError,
-      } = await supabase.storage
+      const { error: uploadError } = await supabase.storage
         .from('chat-images')
-        .upload(
-          fileName,
-          blob,
-          {
-            contentType: 'image/jpeg',
-            upsert: false,
-          }
-        );
-
+        .upload(fileName, blob, {
+          contentType: 'image/jpeg',
+          upsert: false,
+        });
       if (uploadError) {
         throw uploadError;
       }
-
-      const {
-        data: { publicUrl },
-      } = supabase.storage
+      const { data: { publicUrl } } = supabase.storage
         .from('chat-images')
         .getPublicUrl(fileName);
-
       await sendMessage(publicUrl);
     } catch (error: any) {
-      console.error(
-        'Error enviando imagen:',
-        error
-      );
-
-      Alert.alert(
-        'Error',
-        'No se pudo enviar la imagen: ' +
-          (error?.message || 'Error desconocido')
-      );
+      console.error('Error enviando imagen:', error);
+      Alert.alert('Error', 'No se pudo enviar la imagen: ' + (error?.message || 'Error desconocido'));
     } finally {
       setUploading(false);
     }
   };
 
   // ============================================================
-  // ABRIR IMAGEN
+  // ABRIR IMAGEN (CON CONTADOR Y ANIMACIÓN)
   // ============================================================
-
   const handleOpenImage = (item: any) => {
     setSelectedImage(item);
     setModalVisible(true);
+
+    fadeAnim.setValue(1);
+
+    if (item.is_disappearing && item.sender_id !== currentUserId && !item.viewed) {
+      setPhotoTimer(EPHEMERAL_DURATION);
+
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (timerRef.current) clearTimeout(timerRef.current);
+
+      intervalRef.current = setInterval(() => {
+        setPhotoTimer((prev) => {
+          if (prev === null || prev <= 0) return 0;
+          const newValue = prev - 1;
+          if (newValue === 0) {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+            if (timerRef.current) clearTimeout(timerRef.current);
+            executeDestruction(item);
+            return 0;
+          }
+          return newValue;
+        });
+      }, 1000);
+
+      timerRef.current = setTimeout(() => {
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        executeDestruction(item);
+      }, EPHEMERAL_DURATION * 1000);
+    }
   };
 
   // ============================================================
-  // DESTRUIR FOTO TEMPORAL
+  // EJECUTAR DESTRUCCIÓN (CON ANIMACIÓN)
   // ============================================================
+  const executeDestruction = async (itemToDestroy: any) => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    setPhotoTimer(null);
 
-  const destroyImageViewed = async () => {
-    if (!selectedImage) return;
+    Animated.timing(fadeAnim, {
+      toValue: 0,
+      duration: 500,
+      useNativeDriver: true,
+    }).start(() => {
+      setModalVisible(false);
 
-    const item = selectedImage;
-
-    setModalVisible(false);
-
-    if (
-      item.is_disappearing &&
-      item.sender_id !== currentUserId &&
-      !item.viewed
-    ) {
       setMessages((prev) =>
         prev.map((message) =>
-          message.id === item.id
+          message.id === itemToDestroy.id
             ? {
                 ...message,
                 viewed: true,
                 image_url: null,
-                content:
-                  '🔥 [Foto vista y expirada]',
+                content: '🔥 [Foto vista y expirada]',
               }
             : message
         )
       );
 
-      const { error } =
-        await supabase
+      try {
+        supabase
           .from('messages')
           .update({
             viewed: true,
             image_url: null,
-            content:
-              '🔥 [Foto vista y expirada]',
+            content: '🔥 [Foto vista y expirada]',
           })
-          .eq('id', item.id);
-
-      if (error) {
-        console.log(
-          'Error actualizando foto temporal:',
-          error.message
-        );
+          .eq('id', itemToDestroy.id)
+          .then(() => {
+            if (itemToDestroy.image_url) {
+              const urlWithoutQuery = itemToDestroy.image_url.split('?')[0];
+              const pathParts = urlWithoutQuery.split('/');
+              const fileName = pathParts[pathParts.length - 1];
+              if (fileName) {
+                supabase.storage.from('chat-images').remove([fileName]);
+              }
+            }
+          });
+      } catch (error) {
+        console.log('Error destruyendo foto temporal:', error);
       }
 
-      if (item.image_url) {
-        try {
-          const urlWithoutQuery =
-            item.image_url.split('?')[0];
+      setSelectedImage(null);
+      fadeAnim.setValue(1);
+    });
+  };
 
-          const pathParts =
-            urlWithoutQuery.split('/');
-
-          const fileName =
-            pathParts[pathParts.length - 1];
-
-          if (fileName) {
-            await supabase.storage
-              .from('chat-images')
-              .remove([fileName]);
-          }
-        } catch (error) {
-          console.log(
-            'Error eliminando foto temporal:',
-            error
-          );
-        }
-      }
+  // ============================================================
+  // DESTRUIR AL CERRAR MANUALMENTE
+  // ============================================================
+  const destroyImageViewed = () => {
+    if (selectedImage) {
+      executeDestruction(selectedImage);
+    } else {
+      setModalVisible(false);
     }
-
-    setSelectedImage(null);
   };
 
   // ============================================================
   // RENDER
   // ============================================================
-
   return (
     <KeyboardAvoidingView
-      behavior={
-        Platform.OS === 'ios'
-          ? 'padding'
-          : 'height'
-      }
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       style={styles.container}
-      keyboardVerticalOffset={
-        Platform.OS === 'ios'
-          ? 0
-          : 0
-      }
+      keyboardVerticalOffset={0}
     >
-      {/* ======================================================
-          HEADER
-      ====================================================== */}
-
-      <LinearGradient
-        colors={[
-          Colors.surface,
-          Colors.background,
-        ]}
-        style={styles.header}
-      >
+      {/* HEADER */}
+      <LinearGradient colors={[Colors.surface, Colors.background]} style={styles.header}>
         <View style={styles.headerContent}>
-          <TouchableOpacity
-            onPress={handleGoBack}
-            activeOpacity={0.8}
-            style={styles.backButton}
-          >
-            <Text style={styles.backButtonText}>
-              ←
-            </Text>
+          <TouchableOpacity onPress={handleGoBack} activeOpacity={0.8} style={styles.backButton}>
+            <Text style={styles.backButtonText}>←</Text>
           </TouchableOpacity>
 
-          <View style={styles.headerTextWrapper}>
-            <Text style={styles.logo}>
-              N·O·W
-            </Text>
+          <TouchableOpacity style={styles.headerProfileTouch} onPress={() => setProfileModalVisible(true)} activeOpacity={0.8}>
+            {receiverAvatar ? (
+              <Image source={{ uri: receiverAvatar }} style={styles.headerAvatar} />
+            ) : (
+              <View style={styles.headerAvatarPlaceholder}>
+                <Ionicons name="person" size={18} color="#000" />
+              </View>
+            )}
+            <View style={styles.headerTextWrapper}>
+              <Text style={styles.logo}>N·O·W</Text>
+              <Text style={styles.headerTitle} numberOfLines={1}>
+                {receiverNameString || 'Chat Privado'}
+              </Text>
+              <View style={styles.statusDistanceRow}>
+                {isTyping ? (
+                  <Text style={styles.typingIndicatorText}>Escribiendo...</Text>
+                ) : (
+                  <>
+                    <View style={styles.statusDot} />
+                    <Text style={styles.statusText}>{receiverStatus || 'Activo recientemente'}</Text>
+                  </>
+                )}
+                {userDistance && (
+                  <>
+                    <View style={styles.statusSeparator} />
+                    <Ionicons name="location-outline" size={12} color={Colors.primary} />
+                    <Text style={styles.distanceText}>{userDistance || 'Calculando...'}</Text>
+                  </>
+                )}
+              </View>
+            </View>
+          </TouchableOpacity>
 
-            <Text
-              style={styles.headerTitle}
-              numberOfLines={1}
-            >
-              Chat con{' '}
-              {receiverNameString ||
-                'Usuario'}
-            </Text>
-
-            {isTyping &&
-              !isBlocked && (
-                <Text
-                  style={
-                    styles.typingIndicator
-                  }
-                >
-                  Escribiendo...
-                </Text>
-              )}
+          <View style={styles.headerActions}>
+            {isBlocked ? (
+              <TouchableOpacity onPress={handleUnblockUser} style={styles.blockHeaderBtn}>
+                <Ionicons name="lock-open-outline" size={20} color={Colors.primary} />
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity onPress={handleBlockUser} style={styles.blockHeaderBtn}>
+                <Ionicons name="ban-outline" size={20} color="#ff4444" />
+              </TouchableOpacity>
+            )}
           </View>
-
-          <TouchableOpacity
-            onPress={
-              isBlocked
-                ? handleUnblockUser
-                : handleBlockUser
-            }
-            style={[
-              styles.blockBtn,
-              isBlocked &&
-                styles.unblockBtnActive,
-            ]}
-            activeOpacity={0.8}
-          >
-            <Text
-              style={
-                styles.blockBtnText
-              }
-            >
-              {isBlocked
-                ? '✅'
-                : '⛔'}
-            </Text>
-          </TouchableOpacity>
         </View>
       </LinearGradient>
 
-      {/* ======================================================
-          LISTA DE MENSAJES
-      ====================================================== */}
-
+      {/* LISTA DE MENSAJES */}
       <FlatList
         ref={flatListRef}
         data={messages}
-        keyExtractor={(item, index) =>
-          item.id?.toString() ||
-          `message-${index}`
-        }
+        inverted={true}
+        keyExtractor={(item, index) => item.id?.toString() || index.toString()}
+        contentContainerStyle={styles.messageList}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+        initialNumToRender={15}
+        maxToRenderPerBatch={15}
+        onScroll={(event) => {
+          scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
+        }}
+        onEndReached={() => {
+          if (currentUserId) {
+            loadMoreMessages(currentUserId);
+          }
+        }}
+        onEndReachedThreshold={0.3}
         renderItem={({ item }) => {
-          const isMe =
-            item.sender_id ===
-            currentUserId;
+          const isMe = item.sender_id === currentUserId;
+          const isAudio = isAudioMessage(item);
+          const isLocation = isLocationMessage(item);
+          const locationData = isLocation ? getLocationData(item) : null;
+          const isLive = isLocation && locationData?.isLive === true;
+          const avatar = isMe ? myAvatar : receiverAvatar;
 
-          const isExpiredPhoto =
-            item.is_disappearing &&
-            (item.viewed ||
-              !item.image_url);
+          // Determinar si es una foto efímera NO vista aún
+          const isEphemeralPhoto = item.is_disappearing && item.image_url && !item.viewed && !isMe;
 
-          const audioMessage =
-            isAudioMessage(item);
-
-          const audioPlaying =
-            playingAudioId === item.id;
-
-          const locationMessage =
-            typeof item.content ===
-              'string' &&
-            item.content.startsWith(
-              '📍 [Ubicación compartida]'
-            );
 
           return (
-            <View
-              style={[
-                styles.messageBubble,
-                isMe
-                  ? styles.myMessage
-                  : styles.otherMessage,
-              ]}
-            >
-              {/* IMAGEN */}
-              {item.image_url &&
-              !isExpiredPhoto ? (
-                <TouchableOpacity
-                  onPress={() =>
-                    handleOpenImage(item)
-                  }
-                  activeOpacity={0.9}
-                >
-                  <Image
-                    source={{
-                      uri: item.image_url,
-                    }}
-                    style={
-                      styles.chatImage
-                    }
-                    resizeMode="cover"
-                  />
+            <View style={[styles.messageRow, isMe ? styles.myMessageRow : styles.otherMessageRow]}>
+              {isMe ? (
+                // Mensaje propio: burbuja primero, avatar después
+                <>
+                  <View style={[styles.messageBubble, styles.myBubble]}>
+                    {isEphemeralPhoto ? (
+                      <TouchableOpacity onPress={() => handleOpenImage(item)} style={styles.ephemeralContainer}>
+                        <Ionicons name="eye-off" size={30} color="#000" />
+                        <Text style={styles.ephemeralText}>📸 Foto temporal</Text>
+                        <Text style={styles.ephemeralSubText}>Toca para ver</Text>
+                      </TouchableOpacity>
+                    ) : item.image_url ? (
+                      <TouchableOpacity onPress={() => handleOpenImage(item)}>
+                        <Image source={{ uri: item.image_url }} style={styles.messageImage} />
+                        <Text style={[styles.messageText, styles.bubbleTextCommon, styles.imageIndicatorText]}>
+                          {item.content}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : isLocation && locationData ? (
+                      <TouchableOpacity
+                        onPress={() => openLocationActions(locationData)}
+                        activeOpacity={0.7}
+                        style={styles.locationBubble}
+                      >
+                        <Ionicons name={isLive ? 'radio' : 'location'} size={24} color="#000" />
+                        <View style={styles.locationInfo}>
+                          <Text style={[styles.messageText, styles.bubbleTextCommon]}>
+                            {isLive ? '🔴 Ubicación en vivo' : '📍 ' + (locationData.address || 'Ubicación')}
+                          </Text>
+                          {isLive && <Text style={styles.locationTapText}>🔄 Actualizando...</Text>}
+                          <Text style={styles.locationTapText}>Toca para acciones</Text>
+                        </View>
+                      </TouchableOpacity>
+                    ) : isAudio ? (
+                      <View style={styles.audioContainer}>
+                        <TouchableOpacity onPress={() => playVoiceMessage(item)} style={styles.audioPlayButton}>
+                          <Ionicons name={playingAudioId === item.id ? 'pause' : 'play'} size={22} color="#050505" />
+                        </TouchableOpacity>
+                        <View style={styles.audioInfo}>
+                          <Text style={[styles.messageText, styles.bubbleTextCommon]}>🎤 Nota de voz</Text>
+                          <Text style={styles.audioSubText}>
+                            {playingAudioId === item.id ? 'Reproduciendo...' : 'Toca para escuchar'}
+                          </Text>
+                        </View>
+                      </View>
+                    ) : (
+                      <Text style={[styles.messageText, styles.bubbleTextCommon]}>{item.content}</Text>
+                    )}
 
-                  {item.is_disappearing && (
-                    <Text
-                      style={
-                        styles.disappearingBadge
-                      }
-                    >
-                      🔥 Toca para ver
-                      {' '}
-                      (Temporal)
-                    </Text>
-                  )}
-                </TouchableOpacity>
-              ) : audioMessage ? (
-                /* NOTA DE VOZ */
-                <TouchableOpacity
-                  onPress={() =>
-                    playVoiceMessage(item)
-                  }
-                  style={[
-                    styles.audioMessageButton,
-                    isMe
-                      ? styles.audioMessageButtonMe
-                      : styles.audioMessageButtonOther,
-                  ]}
-                  activeOpacity={0.8}
-                >
-                  <View
-                    style={
-                      styles.audioIconCircle
-                    }
-                  >
-                    <Ionicons
-                      name={
-                        audioPlaying
-                          ? 'pause'
-                          : 'play'
-                      }
-                      size={18}
-                      color="#000000"
-                    />
+                    <View style={styles.messageFooter}>
+                      <Text style={styles.messageTime}>
+                        {item.created_at
+                          ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                          : ''}
+                      </Text>
+                      {isMe && (
+                        <Text style={[styles.readStatus, item.is_read && styles.readBlue]}>
+                          {item.is_read ? '✓✓' : '✓'}
+                        </Text>
+                      )}
+                    </View>
                   </View>
 
-                  <View
-                    style={
-                      styles.audioTextContainer
-                    }
-                  >
-                    <Text
-                      style={[
-                        styles.audioTitle,
-                        isMe
-                          ? styles.myMessageText
-                          : styles.otherMessageText,
-                      ]}
-                    >
-                      Nota de voz
-                    </Text>
-
-                    <Text
-                      style={[
-                        styles.audioSubtitle,
-                        isMe
-                          ? styles.myMessageText
-                          : styles.otherMessageText,
-                      ]}
-                    >
-                      {audioPlaying
-                        ? 'Reproduciendo...'
-                        : 'Toca para escuchar'}
-                    </Text>
+                  <View style={[styles.avatarContainer, { marginLeft: 6 }]}>
+                    {avatar ? (
+                      <Image source={{ uri: avatar }} style={styles.avatarImage} />
+                    ) : (
+                      <View style={styles.avatarPlaceholder}>
+                        <Ionicons name="person" size={20} color="#666" />
+                      </View>
+                    )}
                   </View>
-                </TouchableOpacity>
-              ) : locationMessage ? (
-                /* UBICACIÓN */
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={() => {
-                    const parts =
-                      item.content.split('\n');
-
-                    const url =
-                      parts[1];
-
-                    if (url) {
-                      Alert.alert(
-                        'Ubicación compartida',
-                        'Abre Google Maps para ver la ubicación.',
-                        [
-                          {
-                            text: 'Cerrar',
-                            style: 'cancel',
-                          },
-                          {
-                            text: 'Abrir',
-                            onPress: () => {
-                              // React Native abrirá el enlace
-                              // mediante Linking.
-                              import('react-native')
-                                .then(
-                                  ({
-                                    Linking,
-                                  }) => {
-                                    Linking.openURL(
-                                      url
-                                    );
-                                  }
-                                );
-                            },
-                          },
-                        ]
-                      );
-                    }
-                  }}
-                  style={
-                    styles.locationMessage
-                  }
-                >
-                  <Text
-                    style={
-                      styles.locationIcon
-                    }
-                  >
-                    📍
-                  </Text>
-
-                  <View>
-                    <Text
-                      style={[
-                        styles.locationTitle,
-                        isMe
-                          ? styles.myMessageText
-                          : styles.otherMessageText,
-                      ]}
-                    >
-                      Ubicación compartida
-                    </Text>
-
-                    <Text
-                      style={[
-                        styles.locationSubtitle,
-                        isMe
-                          ? styles.myMessageText
-                          : styles.otherMessageText,
-                      ]}
-                    >
-                      Toca para abrir
-                    </Text>
-                  </View>
-                </TouchableOpacity>
+                </>
               ) : (
-                /* TEXTO */
-                <Text
-                  style={[
-                    styles.messageText,
-                    isMe
-                      ? styles.myMessageText
-                      : styles.otherMessageText,
-                  ]}
-                >
-                  {item.content}
-                </Text>
+                // Mensaje de otro: avatar primero, burbuja después
+                <>
+                  <View style={[styles.avatarContainer, { marginRight: 6 }]}>
+                    {avatar ? (
+                      <Image source={{ uri: avatar }} style={styles.avatarImage} />
+                    ) : (
+                      <View style={styles.avatarPlaceholder}>
+                        <Ionicons name="person" size={20} color="#666" />
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={[styles.messageBubble, styles.otherBubble]}>
+                    {isEphemeralPhoto ? (
+                      <TouchableOpacity onPress={() => handleOpenImage(item)} style={styles.ephemeralContainer}>
+                        <Ionicons name="eye-off" size={30} color="#000" />
+                        <Text style={styles.ephemeralText}>📸 Foto temporal</Text>
+                        <Text style={styles.ephemeralSubText}>Toca para ver</Text>
+                      </TouchableOpacity>
+                    ) : item.image_url ? (
+                      <TouchableOpacity onPress={() => handleOpenImage(item)}>
+                        <Image source={{ uri: item.image_url }} style={styles.messageImage} />
+                        <Text style={[styles.messageText, styles.bubbleTextCommon, styles.imageIndicatorText]}>
+                          {item.content}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : isLocation && locationData ? (
+                      <TouchableOpacity
+                        onPress={() => openLocationActions(locationData)}
+                        activeOpacity={0.7}
+                        style={styles.locationBubble}
+                      >
+                        <Ionicons name={isLive ? 'radio' : 'location'} size={24} color="#000" />
+                        <View style={styles.locationInfo}>
+                          <Text style={[styles.messageText, styles.bubbleTextCommon]}>
+                            {isLive ? '🔴 Ubicación en vivo' : '📍 ' + (locationData.address || 'Ubicación')}
+                          </Text>
+                          {isLive && <Text style={styles.locationTapText}>🔄 Actualizando...</Text>}
+                          <Text style={styles.locationTapText}>Toca para acciones</Text>
+                        </View>
+                      </TouchableOpacity>
+                    ) : isAudio ? (
+                      <View style={styles.audioContainer}>
+                        <TouchableOpacity onPress={() => playVoiceMessage(item)} style={styles.audioPlayButton}>
+                          <Ionicons name={playingAudioId === item.id ? 'pause' : 'play'} size={22} color="#050505" />
+                        </TouchableOpacity>
+                        <View style={styles.audioInfo}>
+                          <Text style={[styles.messageText, styles.bubbleTextCommon]}>🎤 Nota de voz</Text>
+                          <Text style={styles.audioSubText}>
+                            {playingAudioId === item.id ? 'Reproduciendo...' : 'Toca para escuchar'}
+                          </Text>
+                        </View>
+                      </View>
+                    ) : (
+                      <Text style={[styles.messageText, styles.bubbleTextCommon]}>{item.content}</Text>
+                    )}
+
+                    <View style={styles.messageFooter}>
+                      <Text style={styles.messageTime}>
+                        {item.created_at
+                          ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                          : ''}
+                      </Text>
+                      {isMe && (
+                        <Text style={[styles.readStatus, item.is_read && styles.readBlue]}>
+                          {item.is_read ? '✓✓' : '✓'}
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+                </>
               )}
             </View>
           );
         }}
-        contentContainerStyle={
-          styles.messageList
-        }
-        onContentSizeChange={
-          scrollToBottom
-        }
-        onLayout={
-          scrollToBottom
-        }
-        keyboardShouldPersistTaps="handled"
       />
 
-      {/* ======================================================
-          MODAL DE IMAGEN
-      ====================================================== */}
+      {/* INPUT */}
+      {isBlocked ? (
+        <View style={styles.blockedNoticeContainer}>
+          <Text style={styles.blockedNoticeText}>Este usuario está bloqueado o la conversación no está disponible.</Text>
+        </View>
+      ) : uploading ? (
+        <View style={styles.uploadingContainer}>
+          <ActivityIndicator size="small" color={Colors.primary} />
+          <Text style={styles.uploadImageText}>Procesando archivo...</Text>
+        </View>
+      ) : isRecording ? (
+        <View style={styles.recordingContainer}>
+          <View style={styles.recordingLeft}>
+            <TouchableOpacity onPress={cancelRecording} style={styles.cancelRecordingButton}>
+              <Ionicons name="close" size={24} color="#ff4444" />
+            </TouchableOpacity>
+            <View style={styles.recordingIndicator}>
+              <Animated.View style={[styles.recordingDot, { opacity: dotOpacity }]} />
+              <Text style={styles.recordingText}>
+                Grabando {`${String(Math.floor(recordingDuration / 60)).padStart(2, '0')}:${String(recordingDuration % 60).padStart(2, '0')}`} / {MAX_RECORDING_DURATION}s
+              </Text>
+            </View>
+          </View>
+          <TouchableOpacity onPress={stopAndSendRecording} style={styles.sendAudioButton}>
+            <Ionicons name="send" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <View style={styles.inputContainer}>
+          <View style={styles.attachmentButtons}>
+            <TouchableOpacity onPress={pickAndSendImage} style={styles.iconButton}>
+              <Ionicons name="image-outline" size={22} color={Colors.textMuted} />
+            </TouchableOpacity>
 
+            <TouchableOpacity onPress={handleSendLocation} style={styles.iconButton}>
+              <Ionicons name="location-outline" size={22} color={Colors.textMuted} />
+            </TouchableOpacity>
+
+            {isLiveLocationActive ? (
+              <TouchableOpacity onPress={stopLiveLocation} style={[styles.iconButton, styles.liveActiveButton]}>
+                <Ionicons name="radio" size={22} color="#ff4444" />
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity onPress={startLiveLocation} style={styles.iconButton}>
+                <Ionicons name="radio-button-on" size={22} color={Colors.textMuted} />
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity onPressIn={startRecording} onPressOut={stopAndSendRecording} style={styles.iconButton}>
+              <Ionicons name="mic-outline" size={22} color={Colors.textMuted} />
+            </TouchableOpacity>
+          </View>
+
+          <TextInput
+            style={styles.textInput}
+            placeholder="Escribe un mensaje..."
+            placeholderTextColor={Colors.textMuted}
+            value={inputText}
+            onChangeText={handleTextChange}
+            multiline
+          />
+
+          <TouchableOpacity
+            onPress={() => sendMessage()}
+            style={[styles.sendButton, !inputText.trim() && styles.sendButtonDisabled]}
+            disabled={!inputText.trim()}
+          >
+            <Ionicons name="send" size={18} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* MODAL DE ACCIONES DE UBICACIÓN */}
+      <Modal visible={showLocationActions} transparent animationType="slide" onRequestClose={() => setShowLocationActions(false)}>
+        <View style={styles.actionModalOverlay}>
+          <View style={styles.actionModalContainer}>
+            <Text style={styles.actionModalTitle}>📍 Acciones de ubicación</Text>
+            <TouchableOpacity style={styles.actionButton} onPress={() => handleLocationAction('estoy_aqui')}>
+              <Ionicons name="location" size={24} color="#000" />
+              <Text style={styles.actionButtonText}>Estoy aquí</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.actionButton} onPress={() => handleLocationAction('como_llegar')}>
+              <Ionicons name="navigate" size={24} color="#000" />
+              <Text style={styles.actionButtonText}>¿Cómo llego?</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.actionButton} onPress={() => handleLocationAction('compartir_mi_ubicacion')}>
+              <Ionicons name="share-social" size={24} color="#000" />
+              <Text style={styles.actionButtonText}>Compartir mi ubicación también</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.actionCancel} onPress={() => setShowLocationActions(false)}>
+              <Text style={styles.actionCancelText}>Cancelar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MODAL DE PERFIL DETALLADO */}
+      <Modal
+        visible={profileModalVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setProfileModalVisible(false)}
+      >
+        <View style={styles.profileModalOverlay}>
+          <View style={styles.profileModalContainer}>
+            <View style={styles.profileModalHeader}>
+              <Text style={styles.profileModalTitle}>Perfil del Usuario</Text>
+              <TouchableOpacity onPress={() => setProfileModalVisible(false)} style={styles.closeIconBtn}>
+                <Ionicons name="close" size={24} color="#FFFFFF" />
+              </TouchableOpacity>
+            </View>
+            <FlatList
+              data={[{ key: 'content' }]}
+              keyExtractor={(item) => item.key}
+              renderItem={() => (
+                <View style={styles.profileScrollContent}>
+                  <FlatList
+                    data={receiverPhotos}
+                    horizontal
+                    pagingEnabled
+                    showsHorizontalScrollIndicator={false}
+                    keyExtractor={(item, idx) => idx.toString()}
+                    renderItem={({ item }) => (
+                      <Image source={{ uri: item }} style={styles.carouselImage} />
+                    )}
+                    ListEmptyComponent={
+                      <Image
+                        source={{ uri: receiverAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300' }}
+                        style={styles.carouselImage}
+                      />
+                    }
+                  />
+                  <View style={styles.profileInfoSection}>
+                    <Text style={styles.modalUserName}>
+                      {receiverProfileData?.full_name || receiverNameString || 'Usuario'}
+                    </Text>
+                    <Text style={styles.modalUserStatus}>
+                      🟢 {receiverStatus || 'Activo recientemente'} {userDistance ? `• A ${userDistance}` : ''}
+                    </Text>
+                    {receiverProfileData?.bio && (
+                      <View style={styles.bioContainer}>
+                        <Text style={styles.bioTitle}>Acerca de mí</Text>
+                        <Text style={styles.bioText}>{receiverProfileData.bio}</Text>
+                      </View>
+                    )}
+                    {receiverProfileData?.interests && (
+                      <View style={styles.interestsContainer}>
+                        <Text style={styles.bioTitle}>Intereses</Text>
+                        <View style={styles.tagsRow}>
+                          {(Array.isArray(receiverProfileData.interests)
+                            ? receiverProfileData.interests
+                            : typeof receiverProfileData.interests === 'string'
+                              ? receiverProfileData.interests.split(',').map((i: string) => i.trim())
+                              : []
+                          ).map((interest: string, index: number) => (
+                            <View key={index} style={styles.tagBadge}>
+                              <Text style={styles.tagText}>{interest}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      </View>
+                    )}
+                    <View style={styles.moderationSection}>
+                      <Text style={styles.bioTitle}>Opciones de Privacidad</Text>
+                      <TouchableOpacity style={styles.modButton} onPress={() => { setProfileModalVisible(false); handleBlockUser(); }}>
+                        <Ionicons name="ban-outline" size={18} color="#ff4444" />
+                        <Text style={[styles.modButtonText, { color: '#ff4444' }]}>Bloquear Usuario</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.modButton} onPress={() => { setProfileModalVisible(false); Alert.alert("Reportar", "Gracias por reportar. Nuestro equipo revisará este perfil."); }}>
+                        <Ionicons name="flag-outline" size={18} color={Colors.textSecondary} />
+                        <Text style={styles.modButtonText}>Reportar Perfil</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </View>
+              )}
+            />
+          </View>
+        </View>
+      </Modal>
+
+      {/* MODAL DE FOTO TEMPORAL */}
       <Modal
         visible={modalVisible}
         transparent={true}
         animationType="fade"
-        onRequestClose={
-          destroyImageViewed
-        }
+        onRequestClose={destroyImageViewed}
       >
-        <View
-          style={
-            styles.imageModalOverlay
-          }
+        <TouchableOpacity
+          activeOpacity={1}
+          style={styles.modalOverlay}
+          onPress={destroyImageViewed}
         >
-          {selectedImage && (
-            <View
-              style={
-                styles.imageModalContainer
-              }
-            >
-              <Image
-                source={{
-                  uri: selectedImage.image_url,
-                }}
-                style={
-                  styles.fullScreenImage
-                }
+          <View style={styles.modalContent}>
+            {selectedImage?.is_disappearing && selectedImage?.sender_id !== currentUserId && photoTimer !== null && photoTimer > 0 && (
+              <View style={styles.timerContainer}>
+                <Ionicons name="flame" size={18} color="#ff4444" />
+                <Text style={styles.timerText}>Autodestrucción en {photoTimer}s</Text>
+                <View style={styles.progressBarBackground}>
+                  <View style={[styles.progressBarFill, { width: `${(photoTimer / EPHEMERAL_DURATION) * 100}%` }]} />
+                </View>
+              </View>
+            )}
+
+            {selectedImage?.image_url && (
+              <Animated.Image
+                source={{ uri: selectedImage.image_url }}
+                style={[styles.modalImage, { opacity: fadeAnim }]}
                 resizeMode="contain"
               />
+            )}
 
-              {selectedImage.is_disappearing &&
-                selectedImage.sender_id !==
-                  currentUserId &&
-                !selectedImage.viewed && (
-                  <Text
-                    style={
-                      styles.modalWarningText
-                    }
-                  >
-                    🔥 Esta foto se
-                    destruirá al cerrar
-                  </Text>
-                )}
+            <TouchableOpacity
+              style={styles.closeModalX}
+              onPress={destroyImageViewed}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="close-circle" size={36} color="#fff" />
+            </TouchableOpacity>
 
-              <TouchableOpacity
-                style={
-                  styles.closeModalButton
-                }
-                onPress={
-                  destroyImageViewed
-                }
-                activeOpacity={0.8}
-              >
-                <Text
-                  style={
-                    styles.closeModalButtonText
-                  }
-                >
-                  Cerrar y Destruir
-                </Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </View>
+            <TouchableOpacity onPress={destroyImageViewed} style={styles.closeModalButton}>
+              <Text style={styles.closeModalText}>Cerrar y destruir ahora</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
       </Modal>
-
-      {/* ======================================================
-          SUBIENDO
-      ====================================================== */}
-
-      {uploading && (
-        <View
-          style={
-            styles.uploadingContainer
-          }
-        >
-          <ActivityIndicator
-            size="small"
-            color={Colors.primary}
-          />
-
-          <Text
-            style={
-              styles.uploadingText
-            }
-          >
-            Enviando contenido...
-          </Text>
-        </View>
-      )}
-
-      {/* ======================================================
-          INPUT / BLOQUEO
-      ====================================================== */}
-
-      {isBlocked ? (
-        <View
-          style={
-            styles.blockedNoticeContainer
-          }
-        >
-          <Text
-            style={
-              styles.blockedNoticeText
-            }
-          >
-            Has bloqueado o te han
-            bloqueado en esta
-            conversación.
-          </Text>
-
-          <TouchableOpacity
-            style={
-              styles.unblockActionBtn
-            }
-            onPress={
-              handleUnblockUser
-            }
-            activeOpacity={0.8}
-          >
-            <Text
-              style={
-                styles.unblockActionText
-              }
-            >
-              Desbloquear usuario
-            </Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <View
-          style={
-            styles.inputContainer
-          }
-        >
-          <View
-            style={
-              styles.topInputRow
-            }
-          >
-            <TextInput
-              style={styles.input}
-              placeholder={
-                isRecording
-                  ? 'Grabando nota de voz...'
-                  : isDisappearing
-                  ? 'Foto temporal...'
-                  : 'Envía un mensaje apasionante...'
-              }
-              placeholderTextColor={
-                Colors.textMuted
-              }
-              value={inputText}
-              onChangeText={
-                handleTextChange
-              }
-              multiline
-              editable={!isRecording}
-            />
-
-            <TouchableOpacity
-              style={[
-                styles.sendButton,
-                isRecording && {
-                  backgroundColor:
-                    '#ef4444',
-                },
-              ]}
-              onPress={() => {
-                if (
-                  inputText.trim()
-                    .length > 0
-                ) {
-                  sendMessage(
-                    null,
-                    null
-                  );
-                } else if (
-                  isRecording
-                ) {
-                  stopAndSendRecording();
-                } else {
-                  startRecording();
-                }
-              }}
-              disabled={uploading}
-              activeOpacity={0.8}
-            >
-              {inputText.trim()
-                .length > 0 ? (
-                <Ionicons
-                  name="flash"
-                  size={22}
-                  color="#000000"
-                />
-              ) : (
-                <Ionicons
-                  name={
-                    isRecording
-                      ? 'stop'
-                      : 'mic'
-                  }
-                  size={22}
-                  color="#000000"
-                />
-              )}
-            </TouchableOpacity>
-          </View>
-
-          <View
-            style={
-              styles.bottomButtonsRow
-            }
-          >
-            {/* IMAGEN */}
-            <TouchableOpacity
-              style={
-                styles.mediaButton
-              }
-              onPress={
-                pickAndSendImage
-              }
-              disabled={
-                uploading ||
-                isRecording
-              }
-              activeOpacity={0.8}
-            >
-              <Text
-                style={
-                  styles.mediaButtonIcon
-                }
-              >
-                📷 Cámara
-              </Text>
-            </TouchableOpacity>
-
-            {/* UBICACIÓN */}
-            <TouchableOpacity
-              style={
-                styles.mediaButton
-              }
-              onPress={
-                handleSendLocation
-              }
-              disabled={
-                uploading ||
-                isRecording
-              }
-              activeOpacity={0.8}
-            >
-              <Text
-                style={
-                  styles.mediaButtonIcon
-                }
-              >
-                📍 Ubicación
-              </Text>
-            </TouchableOpacity>
-
-            {/* TEMPORAL */}
-            <TouchableOpacity
-              style={[
-                styles.fireButton,
-                isDisappearing &&
-                  styles.fireButtonActive,
-              ]}
-              onPress={() =>
-                setIsDisappearing(
-                  !isDisappearing
-                )
-              }
-              disabled={
-                isRecording
-              }
-              activeOpacity={0.8}
-            >
-              <Text
-                style={{
-                  fontSize: 15,
-                  fontWeight: '600',
-                }}
-              >
-                🔥 Temporal
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
     </KeyboardAvoidingView>
   );
 }
@@ -1868,456 +1816,421 @@ export default function ChatScreen() {
 // ============================================================
 // ESTILOS
 // ============================================================
-
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor:
-      Colors.background,
-  },
-
+  container: { flex: 1, backgroundColor: '#000000' },
   header: {
-    paddingTop: 50,
-    paddingHorizontal: 20,
-    paddingBottom: 16,
-    borderBottomLeftRadius: 28,
-    borderBottomRightRadius: 28,
-    borderBottomWidth: 2,
-    borderBottomColor:
-      Colors.borderPrimary,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 4,
-    },
-    shadowOpacity: 0.5,
-    shadowRadius: 6,
-    elevation: 6,
+    paddingTop: Platform.OS === 'ios' ? 50 : 30,
+    paddingBottom: 12,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
   },
-
   headerContent: {
     flexDirection: 'row',
-    justifyContent:
-      'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
   },
-
-  backButton: {
-    marginRight: 12,
-    padding: 4,
-  },
-
-  backButtonText: {
-    color: Colors.primary,
-    fontSize: 24,
-    fontWeight: 'bold',
-  },
-
-  headerTextWrapper: {
-    flex: 1,
-  },
-
-  logo: {
-    fontSize: 14,
-    fontWeight: '900',
-    color: Colors.primary,
-    letterSpacing: 3,
-    marginBottom: 2,
-  },
-
-  headerTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: Colors.textPrimary,
-  },
-
-  typingIndicator: {
-    fontSize: 11,
-    color: Colors.primary,
-    fontWeight: 'bold',
-    marginTop: 2,
-  },
-
-  blockBtn: {
-    padding: 8,
-    backgroundColor:
-      Colors.surface,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor:
-      Colors.borderPrimary,
-  },
-
-  unblockBtnActive: {
-    backgroundColor:
-      'rgba(34, 197, 94, 0.3)',
-  },
-
-  blockBtnText: {
-    fontSize: 16,
-  },
-
-  messageList: {
-    padding: 16,
-    paddingBottom: 10,
-  },
-
-  messageBubble: {
-    padding: 12,
-    borderRadius: 16,
-    marginVertical: 6,
-    maxWidth: '80%',
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 1,
-    },
-    shadowOpacity: 0.3,
-    shadowRadius: 2,
-    elevation: 2,
-  },
-
-  myMessage: {
-    backgroundColor:
-      Colors.accentRed,
-    alignSelf: 'flex-end',
-    borderBottomRightRadius: 4,
-  },
-
-  otherMessage: {
-    backgroundColor:
-      Colors.card,
-    alignSelf: 'flex-start',
-    borderBottomLeftRadius: 4,
-    borderWidth: 1,
-    borderColor:
-      Colors.borderSecondary,
-  },
-
-  messageText: {
-    fontSize: 15,
-  },
-
-  myMessageText: {
-    color: Colors.textPrimary,
-    fontWeight: '500',
-  },
-
-  otherMessageText: {
-    color: Colors.textSecondary,
-  },
-
-  chatImage: {
-    width: 200,
-    height: 200,
-    borderRadius: 12,
-    marginBottom: 6,
-    backgroundColor:
-      Colors.surface,
-  },
-
-  disappearingBadge: {
-    fontSize: 11,
-    color: Colors.primary,
-    fontWeight: 'bold',
-    marginTop: 2,
-    textAlign: 'center',
-  },
-
-  // ==========================================================
-  // AUDIO
-  // ==========================================================
-
-  audioMessageButton: {
-    minWidth: 190,
+  backButton: { padding: 4, marginRight: 4 },
+  backButtonText: { fontSize: 22, color: '#FFFFFF' },
+  headerProfileTouch: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 4,
+    flex: 1,
+    marginHorizontal: 8,
   },
-
-  audioMessageButtonMe: {
-    backgroundColor:
-      'rgba(0, 0, 0, 0.08)',
-    borderRadius: 12,
-    paddingHorizontal: 4,
+  headerAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: Colors.primary,
   },
-
-  audioMessageButtonOther: {
-    backgroundColor:
-      'rgba(255, 255, 255, 0.03)',
-    borderRadius: 12,
-    paddingHorizontal: 4,
+  headerAvatarPlaceholder: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: Colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
   },
+  headerTextWrapper: { flex: 1, marginRight: 4 },
+  logo: { fontSize: 10, letterSpacing: 2, color: Colors.primary, fontWeight: 'bold' },
+  headerTitle: { fontSize: 16, fontWeight: '600', color: '#FFFFFF' },
+  statusDistanceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#22c55e',
+    marginRight: 6,
+  },
+  statusSeparator: {
+    width: 1,
+    height: 12,
+    backgroundColor: Colors.border,
+    marginHorizontal: 8,
+  },
+  statusText: { fontSize: 11, color: Colors.primary, fontWeight: '500' },
+  distanceText: { fontSize: 11, color: Colors.primary, fontWeight: '500', marginLeft: 4 },
+  typingIndicatorText: { fontSize: 11, color: Colors.primary, fontStyle: 'italic' },
+  headerActions: { flexDirection: 'row', alignItems: 'center' },
+  blockHeaderBtn: { padding: 6 },
 
-  audioIconCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor:
-      Colors.primary,
+  // Lista de mensajes
+  messageList: { paddingHorizontal: 16, paddingVertical: 12 },
+  messageRow: {
+    marginVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  myMessageRow: { justifyContent: 'flex-end' },
+  otherMessageRow: { justifyContent: 'flex-start' },
+
+  // Avatares
+  avatarContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    overflow: 'hidden',
+    marginHorizontal: 4,
+  },
+  avatarImage: { width: '100%', height: '100%', borderRadius: 16 },
+  avatarPlaceholder: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#333',
     justifyContent: 'center',
     alignItems: 'center',
   },
 
-  audioTextContainer: {
-    marginLeft: 10,
-    flex: 1,
+  messageBubble: {
+    maxWidth: '70%',
+    padding: 10,
+    borderRadius: 12,
   },
+  myBubble: {
+    backgroundColor: '#ff3b30',
+    borderBottomRightRadius: 2,
+  },
+  otherBubble: {
+    backgroundColor: '#ffcc00',
+    borderBottomLeftRadius: 2,
+  },
+  messageText: { fontSize: 14 },
+  bubbleTextCommon: { color: '#000000', fontWeight: '600' },
+  messageImage: { width: 200, height: 150, borderRadius: 8, marginBottom: 4 },
+  imageIndicatorText: { fontSize: 12, fontStyle: 'italic' },
 
-  audioTitle: {
+  // Estilos para fotos efímeras
+  ephemeralContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 12,
+    minWidth: 120,
+  },
+  ephemeralText: {
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: 'bold',
+    color: '#000',
+    marginTop: 4,
   },
-
-  audioSubtitle: {
+  ephemeralSubText: {
     fontSize: 11,
-    opacity: 0.75,
+    color: '#444',
     marginTop: 2,
   },
 
-  // ==========================================================
-  // UBICACIÓN
-  // ==========================================================
+  // Ubicación
+  locationBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    gap: 10,
+    minWidth: 180,
+  },
+  locationInfo: { flex: 1 },
+  locationTapText: {
+    fontSize: 10,
+    color: '#444',
+    marginTop: 2,
+    fontWeight: '500',
+  },
 
-  locationMessage: {
+  // Audio
+  audioContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     minWidth: 180,
-    paddingVertical: 4,
   },
-
-  locationIcon: {
-    fontSize: 28,
-    marginRight: 10,
+  audioPlayButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(0,0,0,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
   },
+  audioInfo: { flex: 1 },
+  audioSubText: { fontSize: 10, color: '#222222', marginTop: 2, fontWeight: '500' },
 
-  locationTitle: {
+  messageFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    marginTop: 4,
+  },
+  messageTime: { fontSize: 9, color: '#222222', marginRight: 4, fontWeight: '600' },
+  readStatus: { fontSize: 10, color: '#003366' },
+  readBlue: { color: '#0000ff' },
+
+  // Input
+  inputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 8,
+    backgroundColor: Colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
+  attachmentButtons: { flexDirection: 'row', alignItems: 'center' },
+  iconButton: { padding: 8 },
+  liveActiveButton: { backgroundColor: 'rgba(255,68,68,0.2)', borderRadius: 20 },
+
+  textInput: {
+    flex: 1,
+    backgroundColor: Colors.background,
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     fontSize: 14,
-    fontWeight: '700',
+    color: '#FFFFFF',
+    maxHeight: 100,
+    marginHorizontal: 4,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
-
-  locationSubtitle: {
-    fontSize: 11,
-    opacity: 0.75,
-    marginTop: 2,
+  sendButton: {
+    backgroundColor: Colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    marginLeft: 4,
   },
+  sendButtonDisabled: { opacity: 0.5 },
 
-  // ==========================================================
-  // UPLOAD
-  // ==========================================================
+  // Grabación
+  recordingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    backgroundColor: Colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
+  recordingLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  cancelRecordingButton: { padding: 8, marginRight: 8 },
+  recordingIndicator: { flexDirection: 'row', alignItems: 'center' },
+  recordingDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#ff4444',
+    marginRight: 8,
+  },
+  recordingText: { fontSize: 13, color: '#FFFFFF', fontWeight: '500' },
+  sendAudioButton: { backgroundColor: Colors.primary, padding: 8, borderRadius: 20 },
 
   uploadingContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 8,
-    backgroundColor:
-      Colors.surface,
+    padding: 14,
+    backgroundColor: Colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
   },
-
-  uploadingText: {
-    marginLeft: 8,
-    color: Colors.primary,
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-
-  // ==========================================================
-  // INPUT
-  // ==========================================================
-
-  inputContainer: {
-    flexDirection: 'column',
-    padding: 12,
-    backgroundColor:
-      Colors.surface,
-    borderTopWidth: 2,
-    borderTopColor:
-      Colors.borderSecondary,
-  },
-
-  topInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-
-  bottomButtonsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent:
-      'space-between',
-    marginTop: 4,
-  },
-
-  mediaButton: {
-    flex: 1,
-    flexDirection: 'row',
-    padding: 10,
-    marginHorizontal: 4,
-    backgroundColor:
-      Colors.card,
-    borderRadius: 15,
-    alignItems: 'center',
-    justifyContent:
-      'center',
-    borderWidth: 1,
-    borderColor:
-      Colors.borderPrimary,
-  },
-
-  mediaButtonIcon: {
-    fontSize: 13,
-    color: Colors.textPrimary,
-    fontWeight: '600',
-  },
-
-  fireButton: {
-    flex: 1,
-    flexDirection: 'row',
-    padding: 10,
-    marginHorizontal: 4,
-    backgroundColor:
-      Colors.card,
-    borderRadius: 15,
-    alignItems: 'center',
-    justifyContent:
-      'center',
-    opacity: 0.6,
-    borderWidth: 1,
-    borderColor:
-      Colors.borderSecondary,
-  },
-
-  fireButtonActive: {
-    opacity: 1,
-    backgroundColor:
-      '#7f1d1d',
-    transform: [
-      {
-        scale: 1.02,
-      },
-    ],
-  },
-
-  input: {
-    flex: 1,
-    backgroundColor:
-      Colors.background,
-    borderWidth: 1,
-    borderColor: '#262626',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    fontSize: 15,
-    color: Colors.textPrimary,
-    maxHeight: 100,
-  },
-
-  sendButton: {
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 8,
-    backgroundColor:
-      Colors.primary,
-    borderRadius: 22,
-    width: 44,
-    height: 44,
-    shadowColor:
-      Colors.primary,
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.4,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-
-  // ==========================================================
-  // BLOQUEO
-  // ==========================================================
+  uploadImageText: { marginLeft: 8, fontSize: 13, color: Colors.textMuted },
 
   blockedNoticeContainer: {
     padding: 16,
-    backgroundColor:
-      Colors.surface,
-    borderTopWidth: 2,
-    borderTopColor:
-      Colors.borderPrimary,
+    backgroundColor: Colors.surface,
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
+  blockedNoticeText: { fontSize: 13, color: Colors.textMuted, textAlign: 'center' },
+
+  // Modal acciones de ubicación
+  actionModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
+  },
+  actionModalContainer: {
+    backgroundColor: Colors.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    paddingBottom: 30,
+  },
+  actionModalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  actionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Colors.background,
+    padding: 14,
+    borderRadius: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  actionButtonText: {
+    fontSize: 16,
+    color: '#FFFFFF',
+    marginLeft: 12,
+    fontWeight: '500',
+  },
+  actionCancel: { marginTop: 8, padding: 14, alignItems: 'center' },
+  actionCancelText: { fontSize: 16, color: Colors.textSecondary, fontWeight: '600' },
+
+  // Modal foto temporal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    justifyContent: 'center',
     alignItems: 'center',
   },
-
-  blockedNoticeText: {
-    color: '#f87171',
-    fontSize: 13,
-    textAlign: 'center',
-    marginBottom: 8,
-    fontWeight: 'bold',
+  modalContent: {
+    width: '90%',
+    height: '80%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
   },
-
-  unblockActionBtn: {
-    backgroundColor:
-      Colors.borderPrimary,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
+  modalImage: {
+    width: '100%',
+    height: '80%',
+    borderRadius: 8,
+  },
+  closeModalX: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    zIndex: 10,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 20,
+    padding: 4,
+  },
+  closeModalButton: {
+    marginTop: 16,
+    backgroundColor: Colors.primary,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
     borderRadius: 20,
   },
+  closeModalText: { color: '#fff', fontSize: 14, fontWeight: '600' },
 
-  unblockActionText: {
-    color: Colors.textPrimary,
-    fontWeight: 'bold',
-    fontSize: 14,
+  timerContainer: {
+    width: '100%',
+    backgroundColor: 'rgba(20, 20, 20, 0.8)',
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#ff4444',
   },
+  timerText: { color: '#FFFFFF', fontSize: 13, fontWeight: 'bold', marginVertical: 4 },
+  progressBarBackground: {
+    width: '100%',
+    height: 4,
+    backgroundColor: '#333',
+    borderRadius: 2,
+    marginTop: 4,
+    overflow: 'hidden',
+  },
+  progressBarFill: { height: '100%', backgroundColor: '#ff4444' },
 
-  // ==========================================================
-  // MODAL IMAGEN
-  // ==========================================================
-
-  imageModalOverlay: {
+  profileModalOverlay: {
     flex: 1,
-    backgroundColor:
-      'rgba(5, 5, 5, 0.95)',
-    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'flex-end',
+  },
+  profileModalContainer: {
+    height: '85%',
+    backgroundColor: Colors.surface || '#121212',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    overflow: 'hidden',
+  },
+  profileModalHeader: {
+    flexDirection: 'row',
     alignItems: 'center',
-    padding: 20,
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
   },
-
-  imageModalContainer: {
-    width: '100%',
-    height: '80%',
-    justifyContent: 'center',
-    alignItems: 'center',
+  profileModalTitle: { fontSize: 18, fontWeight: 'bold', color: '#FFFFFF' },
+  closeIconBtn: { padding: 4 },
+  profileScrollContent: { paddingBottom: 40 },
+  carouselImage: {
+    width: SCREEN_WIDTH,
+    height: SCREEN_WIDTH * 0.9,
+    resizeMode: 'cover',
+    backgroundColor: '#111',
   },
-
-  fullScreenImage: {
-    width: '100%',
-    height: '80%',
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor:
-      Colors.borderSecondary,
-  },
-
-  modalWarningText: {
-    color: Colors.primary,
+  profileInfoSection: { padding: 20 },
+  modalUserName: { fontSize: 24, fontWeight: 'bold', color: '#FFFFFF' },
+  modalUserStatus: { fontSize: 13, color: Colors.primary, marginTop: 4, marginBottom: 16 },
+  bioContainer: { marginTop: 12 },
+  bioTitle: {
     fontSize: 14,
     fontWeight: 'bold',
-    marginVertical: 12,
+    color: Colors.textSecondary || '#aaa',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
   },
-
-  closeModalButton: {
-    backgroundColor:
-      Colors.borderPrimary,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 25,
-    marginTop: 10,
+  bioText: { fontSize: 15, color: '#FFFFFF', lineHeight: 22 },
+  interestsContainer: { marginTop: 20 },
+  tagsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  tagBadge: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
-
-  closeModalButtonText: {
-    color: Colors.textPrimary,
-    fontWeight: 'bold',
-    fontSize: 16,
+  tagText: { color: '#FFFFFF', fontSize: 13 },
+  moderationSection: { marginTop: 30, borderTopWidth: 1, borderTopColor: Colors.border, paddingTop: 20 },
+  modButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    padding: 14,
+    borderRadius: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
+  modButtonText: { marginLeft: 12, fontSize: 15, fontWeight: '600', color: '#FFFFFF' },
 });

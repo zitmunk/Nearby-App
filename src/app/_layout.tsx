@@ -3,17 +3,26 @@ import { Stack } from 'expo-router';
 import { useEffect } from 'react';
 import { supabase } from '../supabase';
 
-// Configurar el manejador de notificaciones actualizado para versiones recientes de Expo
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: true,
-  } as any), // Usar 'as any' previene cualquier conflicto de tipos estrictos con TypeScript
+  }) as any,
 });
 
 export default function RootLayout() {
   useEffect(() => {
+    // Inicializar anuncios solo en móvil (evita que la web lo analice)
+ //   if (Platform.OS !== 'web') {
+ //     try {
+ //       const ads = require('react-native-google-mobile-ads');
+ //       ads.mobileAds().initialize();
+ //     } catch (e) {
+ //       console.log('Error cargando anuncios', e);
+ //     }
+ //   }
+
     const updateActivity = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
