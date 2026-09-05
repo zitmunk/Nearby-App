@@ -11,16 +11,15 @@ import {
   FlatList,
   Image,
   Modal,
-  Platform,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
-import AdBanner from '../components/AdBanner';
+// import AdBanner from '../components/AdBanner'; // <-- Comentado (anuncios eliminados)
 import { Colors } from '../constants/Colors';
 import { supabase } from '../supabase';
 
@@ -40,9 +39,9 @@ const FILTERS_STORAGE_KEY = '@app_filters';
 const TOOLTIP_SHOWN_KEY = '@tooltip_shown';
 const PAGE_SIZE = 15;
 
-// IDs de prueba para anuncios (solo se usan en móvil)
-const bannerAdUnitId = __DEV__ ? 'ca-app-pub-3940256099942544/6300978111' : 'ca-app-pub-xxxxxxxx/banner-id';
-const nativeAdUnitId = __DEV__ ? 'ca-app-pub-3940256099942544/6300978111' : 'ca-app-pub-xxxxxxxx/native-id';
+// IDs de prueba para anuncios (solo se usan en móvil) - COMENTADOS
+// const bannerAdUnitId = __DEV__ ? 'ca-app-pub-3940256099942544/6300978111' : 'ca-app-pub-xxxxxxxx/banner-id';
+// const nativeAdUnitId = __DEV__ ? 'ca-app-pub-3940256099942544/6300978111' : 'ca-app-pub-xxxxxxxx/native-id';
 
 export default function FeedScreen() {
   const router = useRouter();
@@ -134,14 +133,14 @@ export default function FeedScreen() {
       return age >= minAge && age <= maxAge;
     });
 
-    // Género
+    // Género (case-insensitive)
     if (selectedGender !== 'Todos') {
-  const genderLower = selectedGender.toLowerCase().trim();
-  filtered = filtered.filter((item: any) => {
-    if (!item.gender) return false;
-    return item.gender.toLowerCase().trim() === genderLower;
-  });
-}
+      const genderLower = selectedGender.toLowerCase().trim();
+      filtered = filtered.filter((item: any) => {
+        if (!item.gender) return false;
+        return item.gender.toLowerCase().trim() === genderLower;
+      });
+    }
 
     // Foto
     if (filterOnlyWithPhoto) {
@@ -188,7 +187,7 @@ export default function FeedScreen() {
   const filteredUsers = useMemo(() => getFilteredUsers(allUsers), [allUsers, getFilteredUsers]);
 
   // Datos paginados (sin anuncios)
-  const rawVisibleUsers = useMemo(() => {
+  const visibleUsers = useMemo(() => {
     const start = 0;
     const end = (page + 1) * PAGE_SIZE;
     return filteredUsers.slice(start, end);
@@ -198,116 +197,95 @@ export default function FeedScreen() {
     return (page + 1) * PAGE_SIZE < filteredUsers.length;
   }, [filteredUsers, page]);
 
-  // 🔥 Inyectar anuncios en el grid (cada 10 usuarios)
-  const injectAds = (userList: any[], interval = 10): any[] => {
-    const result: any[] = [];
-    userList.forEach((user, index) => {
-      // Insertar anuncio después de cada 'interval' usuarios (empezando en el 10)
-      if (index > 0 && index % interval === 0) {
-        result.push({
-          id: `ad-${index}`,
-          isAd: true,
-        });
-      }
-      result.push(user);
-    });
-    return result;
-  };
-
-  // Lista final con anuncios intercalados
-  const visibleUsers = useMemo(() => {
-    return injectAds(rawVisibleUsers);
-  }, [rawVisibleUsers]);
-
   // ============================================================
   // CARGA DE DATOS
   // ============================================================
   const fetchAllUsers = async (isRefresh = false) => {
-  if (isRefresh) {
-    setRefreshing(true);
-  } else {
-    setLoading(true);
-  }
-  setErrorMessage(null);
-
-  try {
-    // Obtener ubicación
-    let { status } = await Location.requestForegroundPermissionsAsync();
-    let lat = -20.2642;
-    let long = -70.1185;
-    if (status === 'granted') {
-      let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      lat = location.coords.latitude;
-      long = location.coords.longitude;
-    }
-
-    const { data: authData } = await supabase.auth.getUser();
-    const currentUserId = authData?.user?.id;
-
-    if (currentUserId) {
-      await supabase
-        .from('profiles')
-        .update({ last_seen: new Date().toISOString() })
-        .eq('id', currentUserId);
-    }
-
-    const { data, error } = await supabase.rpc('get_nearby_users', {
-      lat: lat,
-      long: long,
-      radius_meters: 50000,
-    });
-
-    if (error) throw new Error(error.message);
-
-    // 🔥 OBTENER GENDER DE CADA USUARIO (la RPC no lo incluye)
-    const userIds = data.map((u: any) => u.id);
-    const { data: profilesData, error: genderError } = await supabase
-      .from('profiles')
-      .select('id, gender')
-      .in('id', userIds);
-
-    let userList = data;
-    if (!genderError && profilesData) {
-      const genderMap = Object.fromEntries(profilesData.map(p => [p.id, p.gender]));
-      userList = data.map((u: any) => ({ ...u, gender: genderMap[u.id] || null }));
+    if (isRefresh) {
+      setRefreshing(true);
     } else {
-      console.warn('No se pudo obtener gender:', genderError);
+      setLoading(true);
     }
+    setErrorMessage(null);
 
-    // Filtrar al usuario actual
-    let list = (userList || []).filter((item: any) => item.id !== currentUserId);
-
-    // Calcular edad
-    list = list.map((user: any) => {
-      if (user.birth_date) {
-        const age = calculateAge(user.birth_date);
-        user.age = age !== null ? String(age) : null;
+    try {
+      // Obtener ubicación
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      let lat = -20.2642;
+      let long = -70.1185;
+      if (status === 'granted') {
+        let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        lat = location.coords.latitude;
+        long = location.coords.longitude;
       }
-      return user;
-    });
 
-    // Marcar no leídos
-    const usersWithUnread = await Promise.all(
-      list.map(async (user: any) => {
-        const { count } = await supabase
-          .from('messages')
-          .select('*', { count: 'exact', head: true })
-          .eq('sender_id', user.id)
-          .eq('receiver_id', currentUserId)
-          .eq('is_read', false);
-        return { ...user, hasUnread: (count || 0) > 0 };
-      })
-    );
+      const { data: authData } = await supabase.auth.getUser();
+      const currentUserId = authData?.user?.id;
 
-    setAllUsers(usersWithUnread);
-    setPage(0);
-  } catch (err: any) {
-    setErrorMessage(err.message || 'Error al cargar usuarios');
-  } finally {
-    setLoading(false);
-    setRefreshing(false);
-  }
-};
+      if (currentUserId) {
+        await supabase
+          .from('profiles')
+          .update({ last_seen: new Date().toISOString() })
+          .eq('id', currentUserId);
+      }
+
+      const { data, error } = await supabase.rpc('get_nearby_users', {
+        lat: lat,
+        long: long,
+        radius_meters: 50000,
+      });
+
+      if (error) throw new Error(error.message);
+
+      // 🔥 OBTENER GENDER DE CADA USUARIO (la RPC no lo incluye)
+      const userIds = data.map((u: any) => u.id);
+      const { data: profilesData, error: genderError } = await supabase
+        .from('profiles')
+        .select('id, gender')
+        .in('id', userIds);
+
+      let userList = data;
+      if (!genderError && profilesData) {
+        const genderMap = Object.fromEntries(profilesData.map(p => [p.id, p.gender]));
+        userList = data.map((u: any) => ({ ...u, gender: genderMap[u.id] || null }));
+      } else {
+        console.warn('No se pudo obtener gender:', genderError);
+      }
+
+      // Filtrar al usuario actual
+      let list = (userList || []).filter((item: any) => item.id !== currentUserId);
+
+      // Calcular edad
+      list = list.map((user: any) => {
+        if (user.birth_date) {
+          const age = calculateAge(user.birth_date);
+          user.age = age !== null ? String(age) : null;
+        }
+        return user;
+      });
+
+      // Marcar no leídos
+      const usersWithUnread = await Promise.all(
+        list.map(async (user: any) => {
+          const { count } = await supabase
+            .from('messages')
+            .select('*', { count: 'exact', head: true })
+            .eq('sender_id', user.id)
+            .eq('receiver_id', currentUserId)
+            .eq('is_read', false);
+          return { ...user, hasUnread: (count || 0) > 0 };
+        })
+      );
+
+      setAllUsers(usersWithUnread);
+      setPage(0);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error al cargar usuarios');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
 
   const fetchUserChats = async () => {
     setLoading(true);
@@ -727,30 +705,7 @@ export default function FeedScreen() {
               ) : null
             }
             renderItem={({ item }) => {
-              // 🔥 Si es un anuncio, renderizar la tarjeta de anuncio
-              if (item.isAd) {
-                // Solo mostrar en móvil, en web no renderizar nada
-                if (Platform.OS === 'web') return null;
-                return (
-                  <View style={styles.adCardContainer}>
-                    <View style={styles.adHeaderRow}>
-                      <View style={styles.adBadge}>
-                        <Text style={styles.adBadgeText}>ANUNCIO</Text>
-                      </View>
-                      <Text style={styles.adTagline}>Patrocinado</Text>
-                    </View>
-                    <View style={styles.adBannerWrapper}>
-                      <AdBanner
-                        unitId={nativeAdUnitId}
-                        size="mediumRect"
-                        requestOptions={{ requestNonPersonalizedAdsOnly: true }}
-                      />
-                    </View>
-                  </View>
-                );
-              }
-
-              // Usuario normal
+              // Usuario normal (sin anuncios)
               const online = isUserOnline(item.last_seen);
               const age = parseInt(item.age, 10);
               const isValidAge = !isNaN(age) && age > 0 && age < 120;
@@ -1117,17 +1072,6 @@ export default function FeedScreen() {
           )}
         </View>
       </Modal>
-
-      {/* BANNER FIJO INFERIOR (solo en móvil) */}
-      {Platform.OS !== 'web' && (
-        <View style={styles.bottomAdContainer}>
-          <AdBanner
-            unitId={bannerAdUnitId}
-            size="adaptive"
-            requestOptions={{ requestNonPersonalizedAdsOnly: true }}
-          />
-        </View>
-      )}
 
       {/* ============================================================
           BOTTOM NAV CON BADGE DE MENSAJES NO LEÍDOS
@@ -1703,63 +1647,5 @@ const styles = StyleSheet.create({
   fullPhotoImage: {
     width: '100%',
     height: '80%',
-  },
-
-  // 🔥 ESTILOS PARA ANUNCIOS
-  adCardContainer: {
-    flex: 1,
-    margin: 3,
-    borderRadius: 14,
-    backgroundColor: Colors.surface,
-    padding: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#262626',
-    aspectRatio: 1,
-    maxWidth: '31.3%',
-  },
-  adHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '100%',
-    marginBottom: 6,
-  },
-  adBadge: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  adBadgeText: {
-    color: Colors.textMuted,
-    fontSize: 8,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  adTagline: {
-    color: Colors.textMuted,
-    fontSize: 9,
-  },
-  adBannerWrapper: {
-    width: '100%',
-    alignItems: 'center',
-    overflow: 'hidden',
-    borderRadius: 8,
-  },
-
-  bottomAdContainer: {
-    position: 'absolute',
-    bottom: 65,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#0a0a0c',
-    borderTopWidth: 1,
-    borderTopColor: '#262626',
-    paddingVertical: 4,
-    zIndex: 5,
   },
 });
