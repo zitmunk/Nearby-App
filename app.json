@@ -75,20 +75,7 @@
           "photosPermission": "La aplicación necesita acceso a tus fotos para enviarlas en el chat."
         }
       ],
-      [
-        "expo-notifications",
-        {
-          "sounds": []
-        }
-      ],
-      "expo-image",
-      [
-        "react-native-google-mobile-ads",
-        {
-          "androidAppId": "ca-app-pub-3940256099942544~3347511713",
-          "iosAppId": "ca-app-pub-3940256099942544~1458002511"
-        }
-      ]
+     
     ],
     "experiments": {
       "typedRoutes": true,
