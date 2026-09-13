@@ -263,7 +263,7 @@ export default function FeedScreen() {
       const { data, error } = await supabase.rpc('get_nearby_users', {
         lat: lat,
         long: long,
-        radius_meters: 2000000,
+        radius_meters: 2000000, 
       });
 
       if (error) throw new Error(error.message);
