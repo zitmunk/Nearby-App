@@ -10,8 +10,10 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as ScreenCapture from 'expo-screen-capture';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -31,22 +33,91 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { Screen } from '../components/Screen';
 import { Colors } from '../constants/Colors';
 import { supabase } from '../supabase';
 
-const isLoadingMore = useRef(false);
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
-// 🔥 Duración de fotos efímeras (en segundos)
 const EPHEMERAL_DURATION = 10;
+const MAX_AUDIO_RECORDING_DURATION = 30;
+
+// Configuración global para que las notificaciones se muestren incluso en primer plano
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBadge: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
 
 export default function ChatScreen() {
+  const isMountedRef = useRef(true);
+  const isLoadingMore = useRef(false);
 
   const [photoTimer, setPhotoTimer] = useState<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
+  const audioDestructionTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  // ============================================================
+  // CONFIGURACIÓN DE NOTIFICACIONES PUSH
+  // ============================================================
+  useEffect(() => {
+    const setupNotifications = async () => {
+      try {
+        if (Platform.OS === 'android') {
+          await Notifications.setNotificationChannelAsync('default', {
+            name: 'Mensajes',
+            importance: Notifications.AndroidImportance.HIGH,
+            sound: 'default',
+            vibrationPattern: [0, 250, 250, 250],
+            lightColor: '#208AEF',
+          });
+        }
+
+        const { status: existingStatus } = await Notifications.getPermissionsAsync();
+        let finalStatus = existingStatus;
+        if (existingStatus !== 'granted') {
+          const { status } = await Notifications.requestPermissionsAsync();
+          finalStatus = status;
+        }
+        if (finalStatus !== 'granted') {
+          console.log('Permisos de notificación denegados');
+        }
+      } catch (error) {
+        console.log('Error configurando notificaciones:', error);
+      }
+    };
+
+    setupNotifications();
+  }, []);
+
+  
+
+  // ============================================================
+  // ESTADOS DE VIDEO
+  // ============================================================
+  const [selectedVideo, setSelectedVideo] = useState<string | null>(null);
+  const [videoModalVisible, setVideoModalVisible] = useState(false);
+  const [uploadType, setUploadType] = useState<'image' | 'video' | null>(null);
+
+  const videoPlayer = useVideoPlayer(selectedVideo || '', (player) => {
+    player.loop = false;
+  });
+
+  useEffect(() => {
+    if (selectedVideo) {
+      videoPlayer.replace(selectedVideo);
+    }
+  }, [selectedVideo]);
+
+  // ============================================================
+  // RESTO DE ESTADOS
+  // ============================================================
   const { receiverId, receiverName } = useLocalSearchParams();
   const router = useRouter();
 
@@ -63,34 +134,27 @@ export default function ChatScreen() {
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  // PERFIL DEL RECEPTOR
   const [receiverAvatar, setReceiverAvatar] = useState<string | null>(null);
   const [profileModalVisible, setProfileModalVisible] = useState(false);
   const [receiverProfileData, setReceiverProfileData] = useState<any>(null);
   const [receiverPhotos, setReceiverPhotos] = useState<string[]>([]);
   const [receiverStatus, setReceiverStatus] = useState<string>('');
 
-  // DISTANCIA
   const [userDistance, setUserDistance] = useState<string | null>(null);
 
-  // AUDIO
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [recordingTimer, setRecordingTimer] = useState<ReturnType<typeof setInterval> | null>(null);
-  const MAX_RECORDING_DURATION = 60;
   const dotOpacity = useRef(new Animated.Value(1)).current;
 
   const audioPlayerRef = useRef<any>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
 
-  // IMÁGENES
   const [selectedImage, setSelectedImage] = useState<any>(null);
   const [modalVisible, setModalVisible] = useState(false);
 
-  // CHAT
   const [isTyping, setIsTyping] = useState(false);
-  const [isDisappearing, setIsDisappearing] = useState(false);
   const [isBlocked, setIsBlocked] = useState(false);
 
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -98,27 +162,11 @@ export default function ChatScreen() {
   const messageIdsRef = useRef<Set<string>>(new Set());
   const initialMessagesLoadedRef = useRef(false);
 
-  // AUTO SCROLL
   const flatListRef = useRef<FlatList>(null);
   const scrollOffsetRef = useRef(0);
 
-  const scrollToBottom = () => {
-    if (flatListRef.current && messages.length > 0) {
-      setTimeout(() => {
-        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
-      }, 50);
-    }
-  };
-
-  // AVATAR DEL USUARIO ACTUAL
   const [myAvatar, setMyAvatar] = useState<string | null>(null);
 
-  // LIVE LOCATION
-  const [isLiveLocationActive, setIsLiveLocationActive] = useState(false);
-  const liveLocationWatcher = useRef<Location.LocationSubscription | null>(null);
-  const liveLocationInterval = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // ACCIONES DE UBICACIÓN
   const [selectedLocation, setSelectedLocation] = useState<any>(null);
   const [showLocationActions, setShowLocationActions] = useState(false);
 
@@ -126,7 +174,11 @@ export default function ChatScreen() {
   // NAVEGACIÓN
   // ============================================================
   const handleGoBack = () => {
-    router.replace('/feed');
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/feed');
+    }
   };
 
   useEffect(() => {
@@ -182,13 +234,45 @@ export default function ChatScreen() {
           }
         }
 
-        let { status } = await Location.requestForegroundPermissionsAsync();
-        let lat = -20.2642;
-        let long = -70.1185;
+          let { status } = await Location.requestForegroundPermissionsAsync();
+        let lat: number | null = null;
+        let long: number | null = null;
+
         if (status === 'granted') {
-          let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-          lat = location.coords.latitude;
-          long = location.coords.longitude;
+          try {
+            let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+            lat = location.coords.latitude;
+            long = location.coords.longitude;
+          } catch (err) {
+            console.log('GPS falló, usando ubicación del perfil');
+          }
+        }
+
+        // Si el GPS falló, usar la ubicación guardada en el perfil
+        if (lat === null || long === null) {
+          const { data: authData } = await supabase.auth.getUser();
+          const myUserId = authData?.user?.id;
+          if (myUserId) {
+            const { data: myProfile } = await supabase
+              .from('profiles')
+              .select('location')
+              .eq('id', myUserId)
+              .single();
+
+            if (myProfile?.location) {
+              const match = myProfile.location.match(/POINT\(([-\d.]+) ([-\d.]+)\)/);
+              if (match) {
+                long = parseFloat(match[1]);
+                lat = parseFloat(match[2]);
+              }
+            }
+          }
+        }
+
+        // Si aún no hay ubicación, no calcular distancia
+        if (lat === null || long === null) {
+          setUserDistance('Distancia no disponible');
+          return;
         }
 
         const { data: meters, error: rpcError } = await supabase.rpc('get_chat_user_distance', {
@@ -216,6 +300,39 @@ export default function ChatScreen() {
     fetchReceiverProfileAndDistance();
   }, [receiverIdString]);
 
+    // ============================================================
+  // LISTENERS DE NOTIFICACIONES (foreground y tap)
+  // ============================================================
+  useEffect(() => {
+    const receivedSub = Notifications.addNotificationReceivedListener((notification) => {
+      const data = notification.request.content.data;
+      console.log('🔔 Notificación recibida en foreground:', data);
+
+      if (data?.senderId === receiverIdString && currentUserId) {
+        fetchMessages(currentUserId);
+      }
+    });
+
+    const responseSub = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data;
+      console.log('👆 Notificación tocada:', data);
+
+      if (data?.senderId) {
+        router.push({
+  pathname: '/chat',
+  params: {
+    receiverId: String(data.senderId),
+    receiverName: String(data.senderName || 'Chat'),
+  },
+});
+      }
+    });
+
+    return () => {
+      receivedSub.remove();
+      responseSub.remove();
+    };
+  }, [receiverIdString, currentUserId]);
   // ============================================================
   // CONFIGURACIÓN DE AUDIO
   // ============================================================
@@ -273,17 +390,16 @@ export default function ChatScreen() {
       const timer = setInterval(() => {
         setRecordingDuration((prev) => {
           const next = prev + 1;
-          if (next >= MAX_RECORDING_DURATION) {
+          if (next >= MAX_AUDIO_RECORDING_DURATION) {
             clearInterval(timer);
             setRecordingTimer(null);
             stopAndSendRecording();
-            return MAX_RECORDING_DURATION;
+            return MAX_AUDIO_RECORDING_DURATION;
           }
           return next;
         });
       }, 1000);
       setRecordingTimer(timer);
-
     } catch (error: any) {
       console.error('Error al iniciar grabación:', error);
       setIsRecording(false);
@@ -293,6 +409,11 @@ export default function ChatScreen() {
 
   const stopAndSendRecording = async () => {
     if (!isRecording) return;
+    if (recordingDuration < 1) {
+      await cancelRecording();
+      Alert.alert('Grabación muy corta', 'Mantén presionado al menos 1 segundo para grabar un audio.');
+      return;
+    }
 
     if (recordingTimer) {
       clearInterval(recordingTimer);
@@ -310,6 +431,7 @@ export default function ChatScreen() {
       }
 
       setUploading(true);
+      setUploadType(null);
 
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
@@ -335,7 +457,7 @@ export default function ChatScreen() {
         .from('chat-images')
         .getPublicUrl(fileName);
 
-      await sendMessage(null, `🎤 [Nota de voz]\n${publicUrl}`);
+      await sendMessage(null, `🎤 [Nota de voz]\n${publicUrl}`, true, false);
 
       setRecordingDuration(0);
     } catch (error: any) {
@@ -362,7 +484,7 @@ export default function ChatScreen() {
   };
 
   // ============================================================
-  // DETECTAR NOTA DE VOZ Y UBICACIÓN
+  // DETECTAR TIPO DE MENSAJE
   // ============================================================
   const getAudioUrlFromMessage = (item: any): string | null => {
     if (!item?.content) return null;
@@ -377,6 +499,11 @@ export default function ChatScreen() {
 
   const isAudioMessage = (item: any): boolean => {
     return getAudioUrlFromMessage(item) !== null;
+  };
+
+  const isVideoMessage = (item: any): boolean => {
+    if (!item?.content) return false;
+    return typeof item.content === 'string' && item.content.includes('📹 [Video]');
   };
 
   const isLocationMessage = (item: any): boolean => {
@@ -401,14 +528,52 @@ export default function ChatScreen() {
     }
   };
 
-  const isLiveLocation = (item: any): boolean => {
-    const data = getLocationData(item);
-    return data && data.isLive === true;
-  };
-
   // ============================================================
   // REPRODUCIR NOTA DE VOZ
   // ============================================================
+  const scheduleAudioDestruction = (item: any) => {
+    if (audioDestructionTimers.current.has(item.id)) {
+      clearTimeout(audioDestructionTimers.current.get(item.id));
+      audioDestructionTimers.current.delete(item.id);
+    }
+
+    const timer = setTimeout(() => {
+      executeAudioDestruction(item);
+      audioDestructionTimers.current.delete(item.id);
+    }, EPHEMERAL_DURATION * 1000);
+
+    audioDestructionTimers.current.set(item.id, timer);
+  };
+
+  const executeAudioDestruction = async (itemToDestroy: any) => {
+    if (!isMountedRef.current) return;
+    try {
+      if (itemToDestroy.is_disappearing && !itemToDestroy.viewed) {
+        await supabase
+          .from('messages')
+          .update({
+            viewed: true,
+            content: '🎧 [Audio escuchado y expirado]',
+          })
+          .eq('id', itemToDestroy.id);
+
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === itemToDestroy.id
+              ? {
+                  ...msg,
+                  viewed: true,
+                  content: '🎧 [Audio escuchado y expirado]',
+                }
+              : msg
+          )
+        );
+      }
+    } catch (error) {
+      console.log('Error destruyendo audio efímero:', error);
+    }
+  };
+
   const playVoiceMessage = async (item: any) => {
     const audioUrl = getAudioUrlFromMessage(item);
     if (!audioUrl) {
@@ -423,6 +588,7 @@ export default function ChatScreen() {
         setPlayingAudioId(null);
         return;
       }
+
       if (audioPlayerRef.current) {
         try {
           audioPlayerRef.current.pause();
@@ -432,13 +598,23 @@ export default function ChatScreen() {
         }
         audioPlayerRef.current = null;
       }
+
+      if (item.is_disappearing && !item.viewed) {
+        if (audioDestructionTimers.current.has(item.id)) {
+          clearTimeout(audioDestructionTimers.current.get(item.id));
+          audioDestructionTimers.current.delete(item.id);
+        }
+      }
+
       await setAudioModeAsync({
         allowsRecording: false,
         playsInSilentMode: true,
       });
+
       const player = createAudioPlayer(audioUrl);
       audioPlayerRef.current = player;
       setPlayingAudioId(item.id);
+
       const subscription = player.addListener('playbackStatusUpdate', (status: any) => {
         if (status?.didJustFinish) {
           try { subscription.remove(); } catch {}
@@ -447,8 +623,13 @@ export default function ChatScreen() {
             audioPlayerRef.current = null;
           }
           setPlayingAudioId(null);
+
+          if (item.is_disappearing && !item.viewed) {
+            scheduleAudioDestruction(item);
+          }
         }
       });
+
       player.play();
     } catch (error: any) {
       console.error('Error reproduciendo audio:', error);
@@ -458,6 +639,368 @@ export default function ChatScreen() {
         audioPlayerRef.current = null;
       }
       Alert.alert('Error', 'No se pudo reproducir la nota de voz.');
+    }
+  };
+
+  // ============================================================
+  // FUNCIONES PARA FOTOS Y VIDEOS
+  // ============================================================
+  const showMediaOptions = () => {
+    if (Platform.OS === 'web') {
+      pickFromGallery();
+      return;
+    }
+
+    Alert.alert(
+      'Agregar archivo',
+      '⚠️ El contenido multimedia (fotos/videos) podría ser para adultos.',
+      [
+        { text: '📸 Tomar foto', onPress: takePhoto },
+        { text: '🎬 Grabar video (máx 10s)', onPress: recordVideo },
+        { text: '🖼️ Elegir de galería', onPress: pickFromGallery },
+        { text: 'Cancelar', style: 'cancel' },
+      ],
+      { cancelable: true }
+    );
+  };
+
+  const takePhoto = async () => {
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Permiso denegado', 'Se necesita acceso a la cámara.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        quality: 0.7,
+      });
+
+      if (result.canceled) return;
+      await processAndSendImage(result.assets[0].uri);
+    } catch (error) {
+      Alert.alert('Error', 'No se pudo tomar la foto.');
+    }
+  };
+
+  const recordVideo = async () => {
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Permiso denegado', 'Se necesita acceso a la cámara.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['videos'],
+        allowsEditing: true,
+        videoMaxDuration: 10,
+        quality: 0.7,
+      });
+
+      if (result.canceled) return;
+
+      const durationSeconds = result.assets[0].duration ? result.assets[0].duration / 1000 : 0;
+      if (durationSeconds > 10) {
+        Alert.alert('Video demasiado largo', 'El video excede los 10 segundos. Intenta grabar uno más corto.');
+        return;
+      }
+
+      await processAndSendVideo(result.assets[0].uri);
+    } catch (error) {
+      Alert.alert('Error', 'No se pudo grabar el video.');
+    }
+  };
+
+  const pickFromGallery = async () => {
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Permiso denegado', 'Se necesita acceso a la galería.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images', 'videos'],
+        allowsEditing: true,
+        quality: 0.7,
+      });
+
+      if (result.canceled) return;
+
+      const asset = result.assets[0];
+      if (asset.type === 'video') {
+        const durationSeconds = asset.duration ? asset.duration / 1000 : 0;
+
+        if (durationSeconds > 10) {
+          Alert.alert(
+            'Video demasiado largo',
+            'Los videos efímeros no pueden durar más de 10 segundos. Por favor, elige un video más corto.'
+          );
+          return;
+        }
+        await processAndSendVideo(asset.uri);
+      } else {
+        await processAndSendImage(asset.uri);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'No se pudo seleccionar el archivo.');
+    }
+  };
+
+  const processAndSendImage = async (uri: string) => {
+    setUploading(true);
+    setUploadType('image');
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Usuario no autenticado');
+
+      const manipResult = await ImageManipulator.manipulateAsync(
+        uri,
+        [{ resize: { width: 1000 } }],
+        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG }
+      );
+
+      const fileName = `chat_${user.id}_${Date.now()}.jpg`;
+      const response = await fetch(manipResult.uri);
+      const blob = await response.blob();
+
+      const { error } = await supabase.storage
+        .from('chat-images')
+        .upload(fileName, blob, { contentType: 'image/jpeg', upsert: false });
+      if (error) throw error;
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('chat-images')
+        .getPublicUrl(fileName);
+
+      await sendMessage(publicUrl);
+    } catch (error) {
+      Alert.alert('Error', 'No se pudo enviar la imagen.');
+    } finally {
+      setUploading(false);
+      setUploadType(null);
+    }
+  };
+
+  const processAndSendVideo = async (uri: string) => {
+    setUploading(true);
+    setUploadType('video');
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Usuario no autenticado');
+
+      const fileName = `video_${user.id}_${Date.now()}.mp4`;
+      const response = await fetch(uri);
+      const blob = await response.blob();
+
+      const { error } = await supabase.storage
+        .from('chat-images')
+        .upload(fileName, blob, { contentType: 'video/mp4', upsert: false });
+      if (error) throw error;
+
+      const { data: { publicUrl } } = supabase.storage
+        .from('chat-images')
+        .getPublicUrl(fileName);
+
+      await sendMessage(publicUrl, '📹 [Video]', false, true);
+    } catch (error) {
+      Alert.alert('Error', 'No se pudo enviar el video.');
+    } finally {
+      setUploading(false);
+      setUploadType(null);
+    }
+  };
+
+  // ============================================================
+  // ABRIR VIDEO EFÍMERO
+  // ============================================================
+  const handleOpenVideo = (item: any) => {
+    if (!item.image_url) return;
+
+    setSelectedVideo(item.image_url);
+    setVideoModalVisible(true);
+
+    fadeAnim.setValue(1);
+
+    if (item.is_disappearing && item.sender_id !== currentUserId && !item.viewed) {
+      setPhotoTimer(EPHEMERAL_DURATION);
+
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (timerRef.current) clearTimeout(timerRef.current);
+
+      intervalRef.current = setInterval(() => {
+        setPhotoTimer((prev) => {
+          if (prev === null || prev <= 0) return 0;
+          const newValue = prev - 1;
+          if (newValue === 0) {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+            if (timerRef.current) clearTimeout(timerRef.current);
+            executeVideoDestruction(item);
+            return 0;
+          }
+          return newValue;
+        });
+      }, 1000);
+
+      timerRef.current = setTimeout(() => {
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        executeVideoDestruction(item);
+      }, EPHEMERAL_DURATION * 1000);
+    }
+  };
+
+  const executeVideoDestruction = async (itemToDestroy: any) => {
+    if (!isMountedRef.current) return;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    setPhotoTimer(null);
+
+    Animated.timing(fadeAnim, {
+      toValue: 0,
+      duration: 500,
+      useNativeDriver: true,
+    }).start(() => {
+      setVideoModalVisible(false);
+
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === itemToDestroy.id
+            ? {
+                ...message,
+                viewed: true,
+                image_url: null,
+                content: '🎬 [Video visto y expirado]',
+              }
+            : message
+        )
+      );
+
+      try {
+        supabase
+          .from('messages')
+          .update({
+            viewed: true,
+            image_url: null,
+            content: '🎬 [Video visto y expirado]',
+          })
+          .eq('id', itemToDestroy.id)
+          .then(() => {
+            if (itemToDestroy.image_url) {
+              const urlWithoutQuery = itemToDestroy.image_url.split('?')[0];
+              const pathParts = urlWithoutQuery.split('/');
+              const fileName = pathParts[pathParts.length - 1];
+              if (fileName) {
+                supabase.storage.from('chat-images').remove([fileName]);
+              }
+            }
+          });
+      } catch (error) {
+        console.log('Error destruyendo video temporal:', error);
+      }
+
+      setSelectedVideo(null);
+      fadeAnim.setValue(1);
+    });
+  };
+
+  // ============================================================
+  // ABRIR IMAGEN
+  // ============================================================
+  const handleOpenImage = (item: any) => {
+    setSelectedImage(item);
+    setModalVisible(true);
+
+    fadeAnim.setValue(1);
+
+    if (item.is_disappearing && item.sender_id !== currentUserId && !item.viewed) {
+      setPhotoTimer(EPHEMERAL_DURATION);
+
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (timerRef.current) clearTimeout(timerRef.current);
+
+      intervalRef.current = setInterval(() => {
+        setPhotoTimer((prev) => {
+          if (prev === null || prev <= 0) return 0;
+          const newValue = prev - 1;
+          if (newValue === 0) {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+            if (timerRef.current) clearTimeout(timerRef.current);
+            executeDestruction(item);
+            return 0;
+          }
+          return newValue;
+        });
+      }, 1000);
+
+      timerRef.current = setTimeout(() => {
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        executeDestruction(item);
+      }, EPHEMERAL_DURATION * 1000);
+    }
+  };
+
+  const executeDestruction = async (itemToDestroy: any) => {
+    if (!isMountedRef.current) return;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    setPhotoTimer(null);
+
+    Animated.timing(fadeAnim, {
+      toValue: 0,
+      duration: 500,
+      useNativeDriver: true,
+    }).start(() => {
+      setModalVisible(false);
+
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === itemToDestroy.id
+            ? {
+                ...message,
+                viewed: true,
+                image_url: null,
+                content: '🔥 [Foto vista y expirada]',
+              }
+            : message
+        )
+      );
+
+      try {
+        supabase
+          .from('messages')
+          .update({
+            viewed: true,
+            image_url: null,
+            content: '🔥 [Foto vista y expirada]',
+          })
+          .eq('id', itemToDestroy.id)
+          .then(() => {
+            if (itemToDestroy.image_url) {
+              const urlWithoutQuery = itemToDestroy.image_url.split('?')[0];
+              const pathParts = urlWithoutQuery.split('/');
+              const fileName = pathParts[pathParts.length - 1];
+              if (fileName) {
+                supabase.storage.from('chat-images').remove([fileName]);
+              }
+            }
+          });
+      } catch (error) {
+        console.log('Error destruyendo foto temporal:', error);
+      }
+
+      setSelectedImage(null);
+      fadeAnim.setValue(1);
+    });
+  };
+
+  const destroyImageViewed = () => {
+    if (selectedImage) {
+      executeDestruction(selectedImage);
+    } else {
+      setModalVisible(false);
     }
   };
 
@@ -652,7 +1195,7 @@ export default function ChatScreen() {
     if (data) {
       const now = new Date().getTime();
       const processedMessages = data.map((msg) => {
-        if (msg.is_disappearing && msg.image_url) {
+        if (msg.is_disappearing && msg.image_url && !isVideoMessage(msg)) {
           const createdAtTime = new Date(msg.created_at).getTime();
           const hasExpiredTime = now - createdAtTime > 24 * 60 * 60 * 1000;
           if (msg.viewed || hasExpiredTime) {
@@ -665,6 +1208,20 @@ export default function ChatScreen() {
                 : '🔥 [Foto vista y expirada]',
             };
           }
+        }
+        if (msg.is_disappearing && msg.image_url && isVideoMessage(msg) && msg.viewed) {
+          return {
+            ...msg,
+            viewed: true,
+            image_url: null,
+            content: '🎬 [Video visto y expirado]',
+          };
+        }
+        if (msg.is_disappearing && isAudioMessage(msg) && msg.viewed) {
+          return {
+            ...msg,
+            content: '🎧 [Audio escuchado y expirado]',
+          };
         }
         return msg;
       });
@@ -714,7 +1271,7 @@ export default function ChatScreen() {
       if (data && data.length > 0) {
         const now = new Date().getTime();
         const processedOlderMessages = data.map((msg) => {
-          if (msg.is_disappearing && msg.image_url) {
+          if (msg.is_disappearing && msg.image_url && !isVideoMessage(msg)) {
             const createdAtTime = new Date(msg.created_at).getTime();
             const hasExpiredTime = now - createdAtTime > 24 * 60 * 60 * 1000;
             if (msg.viewed || hasExpiredTime) {
@@ -727,6 +1284,20 @@ export default function ChatScreen() {
                   : '🔥 [Foto vista y expirada]',
               };
             }
+          }
+          if (msg.is_disappearing && msg.image_url && isVideoMessage(msg) && msg.viewed) {
+            return {
+              ...msg,
+              viewed: true,
+              image_url: null,
+              content: '🎬 [Video visto y expirado]',
+            };
+          }
+          if (msg.is_disappearing && isAudioMessage(msg) && msg.viewed) {
+            return {
+              ...msg,
+              content: '🎧 [Audio escuchado y expirado]',
+            };
           }
           return msg;
         });
@@ -887,7 +1458,10 @@ export default function ChatScreen() {
 
     return () => {
       isMounted = false;
-      stopLiveLocation();
+      audioDestructionTimers.current.forEach((timer) => clearTimeout(timer));
+      audioDestructionTimers.current.clear();
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (intervalRef.current) clearInterval(intervalRef.current);
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
         typingTimeoutRef.current = null;
@@ -939,10 +1513,17 @@ export default function ChatScreen() {
   // ============================================================
   const sendMessage = async (
     imageUrl: string | null = null,
-    customContent: string | null = null
+    customContent: string | null = null,
+    isAudio = false,
+    isVideo = false
   ) => {
     const textToSend = customContent !== null ? customContent : inputText.trim();
     if ((!textToSend && !imageUrl) || !currentUserId || !receiverIdString) return;
+
+    if (isBlocked) {
+      Alert.alert('Bloqueado', 'No puedes enviar mensajes a este usuario porque está bloqueado.');
+      return;
+    }
 
     await supabase
       .from('profiles')
@@ -969,10 +1550,12 @@ export default function ChatScreen() {
     }
 
     let content = textToSend;
-    if (imageUrl) {
+    if (imageUrl && !isVideo) {
       content = '📸 [Foto Temporal]';
+    } else if (imageUrl && isVideo) {
+      content = '📹 [Video]';
     }
-    const disappearing = imageUrl ? true : false;
+    const disappearing = imageUrl ? true : (isAudio ? true : (isVideo ? true : false));
 
     const { data, error } = await supabase
       .from('messages')
@@ -1000,8 +1583,12 @@ export default function ChatScreen() {
         if (alreadyExists) return prev;
         return [data, ...prev];
       });
+
+      // ✅ NOTA: Las notificaciones push al receptor se manejan
+      // automáticamente desde Supabase (Edge Function + Trigger en INSERT).
+      // NO se envía notificación local desde aquí porque llegaría al emisor,
+      // no al receptor.
     }
-    setIsDisappearing(false);
   };
 
   // ============================================================
@@ -1056,92 +1643,6 @@ export default function ChatScreen() {
   };
 
   // ============================================================
-  // LIVE LOCATION
-  // ============================================================
-  const startLiveLocation = async () => {
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permiso denegado', 'Se necesitan permisos de ubicación.');
-        return;
-      }
-
-      setIsLiveLocationActive(true);
-
-      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      await sendLiveLocationMessage(location.coords.latitude, location.coords.longitude);
-
-      liveLocationWatcher.current = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.High,
-          timeInterval: 10000,
-          distanceInterval: 10,
-        },
-        async (newLocation) => {
-          await sendLiveLocationMessage(newLocation.coords.latitude, newLocation.coords.longitude);
-        }
-      );
-
-      liveLocationInterval.current = setInterval(async () => {
-        if (!isLiveLocationActive) return;
-        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        await sendLiveLocationMessage(loc.coords.latitude, loc.coords.longitude);
-      }, 10000);
-
-      Alert.alert('Ubicación en vivo', 'Ahora estás compartiendo tu ubicación en tiempo real.');
-    } catch (error) {
-      console.error('Error iniciando live location:', error);
-      Alert.alert('Error', 'No se pudo iniciar la ubicación en vivo.');
-      setIsLiveLocationActive(false);
-    }
-  };
-
-  const sendLiveLocationMessage = async (lat: number, lng: number) => {
-    try {
-      let formattedAddress = '';
-      try {
-        const [address] = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
-        const addressParts = [];
-        if (address?.street) addressParts.push(address.street);
-        if (address?.streetNumber) addressParts.push(address.streetNumber);
-        if (address?.city) addressParts.push(address.city);
-        if (address?.country) addressParts.push(address.country);
-        formattedAddress = addressParts.length > 0
-          ? addressParts.join(', ')
-          : `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-      } catch (e) {
-        formattedAddress = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-      }
-
-      const locationData = {
-        lat,
-        lng,
-        address: formattedAddress,
-        isLive: true,
-        timestamp: Date.now(),
-      };
-
-      const content = `📍 [Ubicación en vivo]\n${JSON.stringify(locationData)}`;
-      await sendMessage(null, content);
-    } catch (error) {
-      console.error('Error enviando live location:', error);
-    }
-  };
-
-  const stopLiveLocation = async () => {
-    setIsLiveLocationActive(false);
-    if (liveLocationWatcher.current) {
-      liveLocationWatcher.current.remove();
-      liveLocationWatcher.current = null;
-    }
-    if (liveLocationInterval.current) {
-      clearInterval(liveLocationInterval.current);
-      liveLocationInterval.current = null;
-    }
-    Alert.alert('Ubicación en vivo', 'Has dejado de compartir tu ubicación.');
-  };
-
-  // ============================================================
   // ACCIONES DE UBICACIÓN
   // ============================================================
   const openLocationActions = (locationData: any) => {
@@ -1154,9 +1655,6 @@ export default function ChatScreen() {
     setShowLocationActions(false);
 
     switch (action) {
-      case 'estoy_aqui':
-        await handleSendLocation();
-        break;
       case 'como_llegar':
         try {
           const { status } = await Location.requestForegroundPermissionsAsync();
@@ -1173,180 +1671,38 @@ export default function ChatScreen() {
           Linking.openURL(url);
         }
         break;
-      case 'compartir_mi_ubicacion':
-        await handleSendLocation();
-        break;
       default:
         break;
     }
   };
 
-  // ============================================================
-  // SELECCIONAR Y ENVIAR IMAGEN
-  // ============================================================
-  const pickAndSendImage = async () => {
-    try {
-      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (permissionResult.status !== 'granted') {
-        Alert.alert('Permiso denegado', 'Se necesita acceso a la galería.');
-        return;
-      }
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsEditing: false,
-        quality: 1,
-      });
-      if (result.canceled) return;
-      setUploading(true);
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        Alert.alert('Error', 'No se encontró el usuario actual.');
-        return;
-      }
-      const imageUri = result.assets[0].uri;
-      const manipResult = await ImageManipulator.manipulateAsync(
-        imageUri,
-        [{ resize: { width: 1000 } }],
-        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG }
-      );
-      const finalUri = manipResult.uri;
-      const fileName = `chat_${user.id}_${Date.now()}.jpg`;
-      const response = await fetch(finalUri);
-      const blob = await response.blob();
-      const { error: uploadError } = await supabase.storage
-        .from('chat-images')
-        .upload(fileName, blob, {
-          contentType: 'image/jpeg',
-          upsert: false,
-        });
-      if (uploadError) {
-        throw uploadError;
-      }
-      const { data: { publicUrl } } = supabase.storage
-        .from('chat-images')
-        .getPublicUrl(fileName);
-      await sendMessage(publicUrl);
-    } catch (error: any) {
-      console.error('Error enviando imagen:', error);
-      Alert.alert('Error', 'No se pudo enviar la imagen: ' + (error?.message || 'Error desconocido'));
-    } finally {
-      setUploading(false);
+  const scrollToBottom = () => {
+    if (flatListRef.current && messages.length > 0) {
+      setTimeout(() => {
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      }, 50);
     }
   };
 
-  // ============================================================
-  // ABRIR IMAGEN (CON CONTADOR Y ANIMACIÓN)
-  // ============================================================
-  const handleOpenImage = (item: any) => {
-    setSelectedImage(item);
-    setModalVisible(true);
-
-    fadeAnim.setValue(1);
-
-    if (item.is_disappearing && item.sender_id !== currentUserId && !item.viewed) {
-      setPhotoTimer(EPHEMERAL_DURATION);
-
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (timerRef.current) clearTimeout(timerRef.current);
-
-      intervalRef.current = setInterval(() => {
-        setPhotoTimer((prev) => {
-          if (prev === null || prev <= 0) return 0;
-          const newValue = prev - 1;
-          if (newValue === 0) {
-            if (intervalRef.current) clearInterval(intervalRef.current);
-            if (timerRef.current) clearTimeout(timerRef.current);
-            executeDestruction(item);
-            return 0;
-          }
-          return newValue;
-        });
-      }, 1000);
-
-      timerRef.current = setTimeout(() => {
-        if (intervalRef.current) clearInterval(intervalRef.current);
-        executeDestruction(item);
-      }, EPHEMERAL_DURATION * 1000);
-    }
-  };
-
-  // ============================================================
-  // EJECUTAR DESTRUCCIÓN (CON ANIMACIÓN)
-  // ============================================================
-  const executeDestruction = async (itemToDestroy: any) => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    setPhotoTimer(null);
-
-    Animated.timing(fadeAnim, {
-      toValue: 0,
-      duration: 500,
-      useNativeDriver: true,
-    }).start(() => {
-      setModalVisible(false);
-
-      setMessages((prev) =>
-        prev.map((message) =>
-          message.id === itemToDestroy.id
-            ? {
-                ...message,
-                viewed: true,
-                image_url: null,
-                content: '🔥 [Foto vista y expirada]',
-              }
-            : message
-        )
-      );
-
-      try {
-        supabase
-          .from('messages')
-          .update({
-            viewed: true,
-            image_url: null,
-            content: '🔥 [Foto vista y expirada]',
-          })
-          .eq('id', itemToDestroy.id)
-          .then(() => {
-            if (itemToDestroy.image_url) {
-              const urlWithoutQuery = itemToDestroy.image_url.split('?')[0];
-              const pathParts = urlWithoutQuery.split('/');
-              const fileName = pathParts[pathParts.length - 1];
-              if (fileName) {
-                supabase.storage.from('chat-images').remove([fileName]);
-              }
-            }
-          });
-      } catch (error) {
-        console.log('Error destruyendo foto temporal:', error);
-      }
-
-      setSelectedImage(null);
-      fadeAnim.setValue(1);
-    });
-  };
-
-  // ============================================================
-  // DESTRUIR AL CERRAR MANUALMENTE
-  // ============================================================
-  const destroyImageViewed = () => {
-    if (selectedImage) {
-      executeDestruction(selectedImage);
-    } else {
-      setModalVisible(false);
-    }
-  };
-
-  // ============================================================
+  
+    // ============================================================
   // RENDER
   // ============================================================
   return (
-    <KeyboardAvoidingView
+    <Screen
+   
+    scroll={false}
+    backgroundColor={Colors.background}
+    paddingHorizontal={0}
+    paddingTop={0}
+    paddingBottom={0}
+  >
+        
+        <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       style={styles.container}
       keyboardVerticalOffset={0}
     >
-      {/* HEADER */}
       <LinearGradient colors={[Colors.surface, Colors.background]} style={styles.header}>
         <View style={styles.headerContent}>
           <TouchableOpacity onPress={handleGoBack} activeOpacity={0.8} style={styles.backButton}>
@@ -1400,7 +1756,6 @@ export default function ChatScreen() {
         </View>
       </LinearGradient>
 
-      {/* LISTA DE MENSAJES */}
       <FlatList
         ref={flatListRef}
         data={messages}
@@ -1422,19 +1777,18 @@ export default function ChatScreen() {
         renderItem={({ item }) => {
           const isMe = item.sender_id === currentUserId;
           const isAudio = isAudioMessage(item);
+          const isVideo = isVideoMessage(item);
           const isLocation = isLocationMessage(item);
           const locationData = isLocation ? getLocationData(item) : null;
-          const isLive = isLocation && locationData?.isLive === true;
           const avatar = isMe ? myAvatar : receiverAvatar;
 
-          // Determinar si es una foto efímera NO vista aún
-          const isEphemeralPhoto = item.is_disappearing && item.image_url && !item.viewed && !isMe;
-
+          const isEphemeralPhoto = item.is_disappearing && item.image_url && !item.viewed && !isMe && !isVideo;
+          const isEphemeralVideo = item.is_disappearing && item.image_url && !item.viewed && !isMe && isVideo;
+          const isEphemeralAudio = isAudio && item.is_disappearing && !item.viewed;
 
           return (
             <View style={[styles.messageRow, isMe ? styles.myMessageRow : styles.otherMessageRow]}>
               {isMe ? (
-                // Mensaje propio: burbuja primero, avatar después
                 <>
                   <View style={[styles.messageBubble, styles.myBubble]}>
                     {isEphemeralPhoto ? (
@@ -1442,6 +1796,17 @@ export default function ChatScreen() {
                         <Ionicons name="eye-off" size={30} color="#000" />
                         <Text style={styles.ephemeralText}>📸 Foto temporal</Text>
                         <Text style={styles.ephemeralSubText}>Toca para ver</Text>
+                      </TouchableOpacity>
+                    ) : isEphemeralVideo ? (
+                      <TouchableOpacity onPress={() => handleOpenVideo(item)} style={styles.ephemeralContainer}>
+                        <Ionicons name="eye-off" size={30} color="#000" />
+                        <Text style={styles.ephemeralText}>🎬 Video temporal</Text>
+                        <Text style={styles.ephemeralSubText}>Toca para ver</Text>
+                      </TouchableOpacity>
+                    ) : item.image_url && isVideo ? (
+                      <TouchableOpacity onPress={() => handleOpenVideo(item)} style={styles.videoPlaceholder}>
+                        <Ionicons name="play-circle" size={40} color="#fff" />
+                        <Text style={styles.videoText}>📹 Video</Text>
                       </TouchableOpacity>
                     ) : item.image_url ? (
                       <TouchableOpacity onPress={() => handleOpenImage(item)}>
@@ -1456,13 +1821,12 @@ export default function ChatScreen() {
                         activeOpacity={0.7}
                         style={styles.locationBubble}
                       >
-                        <Ionicons name={isLive ? 'radio' : 'location'} size={24} color="#000" />
+                        <Ionicons name="location" size={24} color="#000" />
                         <View style={styles.locationInfo}>
                           <Text style={[styles.messageText, styles.bubbleTextCommon]}>
-                            {isLive ? '🔴 Ubicación en vivo' : '📍 ' + (locationData.address || 'Ubicación')}
+                            📍 {locationData.address || 'Ubicación'}
                           </Text>
-                          {isLive && <Text style={styles.locationTapText}>🔄 Actualizando...</Text>}
-                          <Text style={styles.locationTapText}>Toca para acciones</Text>
+                          <Text style={styles.locationTapText}>Toca para abrir en Google Maps</Text>
                         </View>
                       </TouchableOpacity>
                     ) : isAudio ? (
@@ -1471,9 +1835,11 @@ export default function ChatScreen() {
                           <Ionicons name={playingAudioId === item.id ? 'pause' : 'play'} size={22} color="#050505" />
                         </TouchableOpacity>
                         <View style={styles.audioInfo}>
-                          <Text style={[styles.messageText, styles.bubbleTextCommon]}>🎤 Nota de voz</Text>
+                          <Text style={[styles.messageText, styles.bubbleTextCommon]}>
+                            {isEphemeralAudio ? '🎤 [Audio efímero]' : '🎤 Nota de voz'}
+                          </Text>
                           <Text style={styles.audioSubText}>
-                            {playingAudioId === item.id ? 'Reproduciendo...' : 'Toca para escuchar'}
+                            {playingAudioId === item.id ? 'Reproduciendo...' : (isEphemeralAudio ? 'Toca para escuchar (se destruirá en 10s)' : 'Toca para escuchar')}
                           </Text>
                         </View>
                       </View>
@@ -1506,7 +1872,6 @@ export default function ChatScreen() {
                   </View>
                 </>
               ) : (
-                // Mensaje de otro: avatar primero, burbuja después
                 <>
                   <View style={[styles.avatarContainer, { marginRight: 6 }]}>
                     {avatar ? (
@@ -1525,6 +1890,17 @@ export default function ChatScreen() {
                         <Text style={styles.ephemeralText}>📸 Foto temporal</Text>
                         <Text style={styles.ephemeralSubText}>Toca para ver</Text>
                       </TouchableOpacity>
+                    ) : isEphemeralVideo ? (
+                      <TouchableOpacity onPress={() => handleOpenVideo(item)} style={styles.ephemeralContainer}>
+                        <Ionicons name="eye-off" size={30} color="#000" />
+                        <Text style={styles.ephemeralText}>🎬 Video temporal</Text>
+                        <Text style={styles.ephemeralSubText}>Toca para ver</Text>
+                      </TouchableOpacity>
+                    ) : item.image_url && isVideo ? (
+                      <TouchableOpacity onPress={() => handleOpenVideo(item)} style={styles.videoPlaceholder}>
+                        <Ionicons name="play-circle" size={40} color="#fff" />
+                        <Text style={styles.videoText}>📹 Video</Text>
+                      </TouchableOpacity>
                     ) : item.image_url ? (
                       <TouchableOpacity onPress={() => handleOpenImage(item)}>
                         <Image source={{ uri: item.image_url }} style={styles.messageImage} />
@@ -1538,13 +1914,12 @@ export default function ChatScreen() {
                         activeOpacity={0.7}
                         style={styles.locationBubble}
                       >
-                        <Ionicons name={isLive ? 'radio' : 'location'} size={24} color="#000" />
+                        <Ionicons name="location" size={24} color="#000" />
                         <View style={styles.locationInfo}>
                           <Text style={[styles.messageText, styles.bubbleTextCommon]}>
-                            {isLive ? '🔴 Ubicación en vivo' : '📍 ' + (locationData.address || 'Ubicación')}
+                            📍 {locationData.address || 'Ubicación'}
                           </Text>
-                          {isLive && <Text style={styles.locationTapText}>🔄 Actualizando...</Text>}
-                          <Text style={styles.locationTapText}>Toca para acciones</Text>
+                          <Text style={styles.locationTapText}>Toca para abrir en Google Maps</Text>
                         </View>
                       </TouchableOpacity>
                     ) : isAudio ? (
@@ -1553,9 +1928,11 @@ export default function ChatScreen() {
                           <Ionicons name={playingAudioId === item.id ? 'pause' : 'play'} size={22} color="#050505" />
                         </TouchableOpacity>
                         <View style={styles.audioInfo}>
-                          <Text style={[styles.messageText, styles.bubbleTextCommon]}>🎤 Nota de voz</Text>
+                          <Text style={[styles.messageText, styles.bubbleTextCommon]}>
+                            {isEphemeralAudio ? '🎤 [Audio efímero]' : '🎤 Nota de voz'}
+                          </Text>
                           <Text style={styles.audioSubText}>
-                            {playingAudioId === item.id ? 'Reproduciendo...' : 'Toca para escuchar'}
+                            {playingAudioId === item.id ? 'Reproduciendo...' : (isEphemeralAudio ? 'Toca para escuchar (se destruirá en 10s)' : 'Toca para escuchar')}
                           </Text>
                         </View>
                       </View>
@@ -1583,7 +1960,6 @@ export default function ChatScreen() {
         }}
       />
 
-      {/* INPUT */}
       {isBlocked ? (
         <View style={styles.blockedNoticeContainer}>
           <Text style={styles.blockedNoticeText}>Este usuario está bloqueado o la conversación no está disponible.</Text>
@@ -1591,7 +1967,9 @@ export default function ChatScreen() {
       ) : uploading ? (
         <View style={styles.uploadingContainer}>
           <ActivityIndicator size="small" color={Colors.primary} />
-          <Text style={styles.uploadImageText}>Procesando archivo...</Text>
+          <Text style={styles.uploadImageText}>
+            {uploadType === 'image' ? 'Subiendo foto...' : uploadType === 'video' ? 'Subiendo video...' : 'Procesando archivo...'}
+          </Text>
         </View>
       ) : isRecording ? (
         <View style={styles.recordingContainer}>
@@ -1602,7 +1980,7 @@ export default function ChatScreen() {
             <View style={styles.recordingIndicator}>
               <Animated.View style={[styles.recordingDot, { opacity: dotOpacity }]} />
               <Text style={styles.recordingText}>
-                Grabando {`${String(Math.floor(recordingDuration / 60)).padStart(2, '0')}:${String(recordingDuration % 60).padStart(2, '0')}`} / {MAX_RECORDING_DURATION}s
+                Grabando {`${String(Math.floor(recordingDuration / 60)).padStart(2, '0')}:${String(recordingDuration % 60).padStart(2, '0')}`} / {MAX_AUDIO_RECORDING_DURATION}s
               </Text>
             </View>
           </View>
@@ -1613,26 +1991,12 @@ export default function ChatScreen() {
       ) : (
         <View style={styles.inputContainer}>
           <View style={styles.attachmentButtons}>
-            <TouchableOpacity onPress={pickAndSendImage} style={styles.iconButton}>
-              <Ionicons name="image-outline" size={22} color={Colors.textMuted} />
+            <TouchableOpacity onPress={showMediaOptions} style={styles.iconButton}>
+              <Ionicons name="camera-outline" size={22} color={Colors.textMuted} />
             </TouchableOpacity>
 
             <TouchableOpacity onPress={handleSendLocation} style={styles.iconButton}>
               <Ionicons name="location-outline" size={22} color={Colors.textMuted} />
-            </TouchableOpacity>
-
-            {isLiveLocationActive ? (
-              <TouchableOpacity onPress={stopLiveLocation} style={[styles.iconButton, styles.liveActiveButton]}>
-                <Ionicons name="radio" size={22} color="#ff4444" />
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity onPress={startLiveLocation} style={styles.iconButton}>
-                <Ionicons name="radio-button-on" size={22} color={Colors.textMuted} />
-              </TouchableOpacity>
-            )}
-
-            <TouchableOpacity onPressIn={startRecording} onPressOut={stopAndSendRecording} style={styles.iconButton}>
-              <Ionicons name="mic-outline" size={22} color={Colors.textMuted} />
             </TouchableOpacity>
           </View>
 
@@ -1646,31 +2010,48 @@ export default function ChatScreen() {
           />
 
           <TouchableOpacity
-            onPress={() => sendMessage()}
-            style={[styles.sendButton, !inputText.trim() && styles.sendButtonDisabled]}
-            disabled={!inputText.trim()}
+            style={[styles.sendButton, !inputText.trim() && styles.micButton]}
+            onPress={() => {
+              console.log('🟢 Botón presionado - inputText:', inputText.trim());
+
+              if (inputText.trim()) {
+                console.log('📨 Enviando mensaje de texto');
+                sendMessage();
+              } else {
+                if (!isRecording) {
+                  console.log('🎤 Iniciando grabación');
+                  startRecording();
+                } else {
+                  console.log('🛑 Deteniendo grabación');
+                  if (recordingDuration > 1) {
+                    stopAndSendRecording();
+                  } else {
+                    cancelRecording();
+                    Alert.alert('Grabación muy corta', 'Grabá al menos 1 segundo para enviar un audio.');
+                  }
+                }
+              }
+            }}
+            activeOpacity={0.8}
           >
-            <Ionicons name="send" size={18} color="#fff" />
+            {isRecording ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : inputText.trim() ? (
+              <Ionicons name="send" size={20} color="#fff" />
+            ) : (
+              <Ionicons name="mic" size={22} color="#fff" />
+            )}
           </TouchableOpacity>
         </View>
       )}
 
-      {/* MODAL DE ACCIONES DE UBICACIÓN */}
       <Modal visible={showLocationActions} transparent animationType="slide" onRequestClose={() => setShowLocationActions(false)}>
         <View style={styles.actionModalOverlay}>
           <View style={styles.actionModalContainer}>
-            <Text style={styles.actionModalTitle}>📍 Acciones de ubicación</Text>
-            <TouchableOpacity style={styles.actionButton} onPress={() => handleLocationAction('estoy_aqui')}>
-              <Ionicons name="location" size={24} color="#000" />
-              <Text style={styles.actionButtonText}>Estoy aquí</Text>
-            </TouchableOpacity>
+            <Text style={styles.actionModalTitle}>📍 Ubicación compartida</Text>
             <TouchableOpacity style={styles.actionButton} onPress={() => handleLocationAction('como_llegar')}>
               <Ionicons name="navigate" size={24} color="#000" />
-              <Text style={styles.actionButtonText}>¿Cómo llego?</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton} onPress={() => handleLocationAction('compartir_mi_ubicacion')}>
-              <Ionicons name="share-social" size={24} color="#000" />
-              <Text style={styles.actionButtonText}>Compartir mi ubicación también</Text>
+              <Text style={styles.actionButtonText}>¿Cómo llegar?</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.actionCancel} onPress={() => setShowLocationActions(false)}>
               <Text style={styles.actionCancelText}>Cancelar</Text>
@@ -1679,7 +2060,6 @@ export default function ChatScreen() {
         </View>
       </Modal>
 
-      {/* MODAL DE PERFIL DETALLADO */}
       <Modal
         visible={profileModalVisible}
         transparent={true}
@@ -1764,7 +2144,6 @@ export default function ChatScreen() {
         </View>
       </Modal>
 
-      {/* MODAL DE FOTO TEMPORAL */}
       <Modal
         visible={modalVisible}
         transparent={true}
@@ -1788,11 +2167,17 @@ export default function ChatScreen() {
             )}
 
             {selectedImage?.image_url && (
-              <Animated.Image
-                source={{ uri: selectedImage.image_url }}
-                style={[styles.modalImage, { opacity: fadeAnim }]}
-                resizeMode="contain"
-              />
+              <>
+                <View style={styles.warningContainer}>
+                  <Ionicons name="warning-outline" size={16} color="#f59e0b" />
+                  <Text style={styles.warningText}>Este contenido podría ser para adultos</Text>
+                </View>
+                <Animated.Image
+                  source={{ uri: selectedImage.image_url }}
+                  style={[styles.modalImage, { opacity: fadeAnim }]}
+                  resizeMode="contain"
+                />
+              </>
             )}
 
             <TouchableOpacity
@@ -1809,13 +2194,80 @@ export default function ChatScreen() {
           </View>
         </TouchableOpacity>
       </Modal>
-    </KeyboardAvoidingView>
+
+      <Modal
+        visible={videoModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {
+          if (selectedVideo) {
+            const item = messages.find(m => m.image_url === selectedVideo);
+            if (item && item.is_disappearing && !item.viewed) {
+              executeVideoDestruction(item);
+            } else {
+              setVideoModalVisible(false);
+            }
+          } else {
+            setVideoModalVisible(false);
+          }
+        }}
+      >
+        <View style={styles.videoModalOverlay}>
+          <TouchableOpacity
+            style={styles.videoCloseButton}
+            onPress={() => {
+              if (selectedVideo) {
+                const item = messages.find(m => m.image_url === selectedVideo);
+                if (item && item.is_disappearing && !item.viewed) {
+                  executeVideoDestruction(item);
+                } else {
+                  setVideoModalVisible(false);
+                }
+              } else {
+                setVideoModalVisible(false);
+              }
+            }}
+          >
+            <Ionicons name="close-circle" size={44} color="#fff" />
+          </TouchableOpacity>
+
+          <View style={styles.warningContainer}>
+            <Ionicons name="warning-outline" size={16} color="#f59e0b" />
+            <Text style={styles.warningText}>Este video podría ser para adultos</Text>
+          </View>
+
+          {selectedVideo && (
+            <VideoView
+              player={videoPlayer}
+              style={{ width: '100%', height: '80%', backgroundColor: '#000' }}
+              contentFit="contain"
+              nativeControls={true}
+            />
+          )}
+
+          {(() => {
+            const item = messages.find(m => m.image_url === selectedVideo);
+            if (item?.is_disappearing && item?.sender_id !== currentUserId && !item?.viewed && photoTimer !== null && photoTimer > 0) {
+              return (
+                <View style={styles.timerContainer}>
+                  <Ionicons name="flame" size={18} color="#ff4444" />
+                  <Text style={styles.timerText}>Autodestrucción en {photoTimer}s</Text>
+                  <View style={styles.progressBarBackground}>
+                    <View style={[styles.progressBarFill, { width: `${(photoTimer / EPHEMERAL_DURATION) * 100}%` }]} />
+                  </View>
+                </View>
+              );
+            }
+            return null;
+          })()}
+        </View>
+      </Modal>
+      </KeyboardAvoidingView>
+    </Screen>
   );
 }
 
-// ============================================================
-// ESTILOS
-// ============================================================
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000000' },
   header: {
@@ -1882,7 +2334,6 @@ const styles = StyleSheet.create({
   headerActions: { flexDirection: 'row', alignItems: 'center' },
   blockHeaderBtn: { padding: 6 },
 
-  // Lista de mensajes
   messageList: { paddingHorizontal: 16, paddingVertical: 12 },
   messageRow: {
     marginVertical: 4,
@@ -1892,7 +2343,6 @@ const styles = StyleSheet.create({
   myMessageRow: { justifyContent: 'flex-end' },
   otherMessageRow: { justifyContent: 'flex-start' },
 
-  // Avatares
   avatarContainer: {
     width: 32,
     height: 32,
@@ -1927,7 +2377,6 @@ const styles = StyleSheet.create({
   messageImage: { width: 200, height: 150, borderRadius: 8, marginBottom: 4 },
   imageIndicatorText: { fontSize: 12, fontStyle: 'italic' },
 
-  // Estilos para fotos efímeras
   ephemeralContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -1946,7 +2395,53 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  // Ubicación
+  videoPlaceholder: {
+    width: 200,
+    height: 120,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  videoText: {
+    color: '#fff',
+    marginTop: 6,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  videoModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  videoCloseButton: {
+    position: 'absolute',
+    top: 40,
+    right: 20,
+    zIndex: 10,
+  },
+
+  warningContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    marginBottom: 10,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+    width: '100%',
+    justifyContent: 'center',
+  },
+  warningText: {
+    color: '#f59e0b',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+
   locationBubble: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1962,7 +2457,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
 
-  // Audio
   audioContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1990,7 +2484,6 @@ const styles = StyleSheet.create({
   readStatus: { fontSize: 10, color: '#003366' },
   readBlue: { color: '#0000ff' },
 
-  // Input
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2001,7 +2494,6 @@ const styles = StyleSheet.create({
   },
   attachmentButtons: { flexDirection: 'row', alignItems: 'center' },
   iconButton: { padding: 8 },
-  liveActiveButton: { backgroundColor: 'rgba(255,68,68,0.2)', borderRadius: 20 },
 
   textInput: {
     flex: 1,
@@ -2020,14 +2512,15 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     marginLeft: 4,
   },
-  sendButtonDisabled: { opacity: 0.5 },
+  micButton: {
+    backgroundColor: Colors.primary,
+  },
 
-  // Grabación
   recordingContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2070,7 +2563,6 @@ const styles = StyleSheet.create({
   },
   blockedNoticeText: { fontSize: 13, color: Colors.textMuted, textAlign: 'center' },
 
-  // Modal acciones de ubicación
   actionModalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',
@@ -2109,7 +2601,6 @@ const styles = StyleSheet.create({
   actionCancel: { marginTop: 8, padding: 14, alignItems: 'center' },
   actionCancelText: { fontSize: 16, color: Colors.textSecondary, fontWeight: '600' },
 
-  // Modal foto temporal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.92)',

@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { FlatList, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Screen } from '../components/Screen'; // 👈 NUEVO
 import { Colors } from '../constants/Colors';
 import { supabase } from '../supabase';
 
@@ -26,12 +27,11 @@ export default function InboxScreen() {
 
     if (data) {
       const uniqueChatsMap = new Map();
-      
+
       for (const m of data) {
         const companionId = m.sender_id === user.id ? m.receiver_id : m.sender_id;
-        
+
         if (!uniqueChatsMap.has(companionId)) {
-          // Consultar si hay mensajes no leídos de este usuario específico
           const { count } = await supabase
             .from('messages')
             .select('*', { count: 'exact', head: true })
@@ -39,10 +39,10 @@ export default function InboxScreen() {
             .eq('receiver_id', user.id)
             .eq('is_read', false);
 
-          uniqueChatsMap.set(companionId, { 
-            ...m, 
-            companionId, 
-            hasUnread: (count || 0) > 0 
+          uniqueChatsMap.set(companionId, {
+            ...m,
+            companionId,
+            hasUnread: (count || 0) > 0
           });
         }
       }
@@ -53,54 +53,67 @@ export default function InboxScreen() {
   }
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Mis Chats</Text>
-      <FlatList
-        data={conversations}
-        keyExtractor={(item) => item.id}
-        ListEmptyComponent={
-          !loading ? <Text style={styles.empty}>Aún no tienes conversaciones.</Text> : null
-        }
-        renderItem={({ item }) => {
-          const chatName = item.profiles?.full_name || item.profiles?.username || 'Usuario';
+    <Screen
+      scroll={false}
+      backgroundColor={Colors.background}
+      paddingHorizontal={0}
+      paddingTop={0}
+      paddingBottom={0}
+    >
+      <View style={styles.container}>
+        <Text style={styles.title}>Mis Chats</Text>
+        <FlatList
+          data={conversations}
+          keyExtractor={(item) => item.id}
+          ListEmptyComponent={
+            !loading ? <Text style={styles.empty}>Aún no tienes conversaciones.</Text> : null
+          }
+          renderItem={({ item }) => {
+            const chatName = item.profiles?.full_name || item.profiles?.username || 'Usuario';
 
-          return (
-            <TouchableOpacity 
-              style={styles.chatItem}
-              activeOpacity={0.8}
-              onPress={() => router.push({ 
-                pathname: '/chat', 
-                params: { receiverId: item.companionId, receiverName: chatName } 
-              })}
-            >
-              <Image 
-                source={{ uri: item.profiles?.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300' }} 
-                style={styles.avatar} 
-              />
-              <View style={styles.chatInfo}>
-                <View style={styles.chatHeaderRow}>
-                  <Text style={styles.userName}>{chatName}</Text>
-                  {item.hasUnread && (
-                    <Ionicons name="mail" size={16} color="#ef4444" />
-                  )}
+            return (
+              <TouchableOpacity
+                style={styles.chatItem}
+                activeOpacity={0.8}
+                onPress={() => router.push({
+                  pathname: '/chat',
+                  params: { receiverId: item.companionId, receiverName: chatName }
+                })}
+              >
+                <Image
+                  source={{ uri: item.profiles?.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300' }}
+                  style={styles.avatar}
+                />
+                <View style={styles.chatInfo}>
+                  <View style={styles.chatHeaderRow}>
+                    <Text style={styles.userName}>{chatName}</Text>
+                    {item.hasUnread && (
+                      <Ionicons name="mail" size={16} color="#ef4444" />
+                    )}
+                  </View>
+                  <Text style={styles.lastMessage} numberOfLines={1}>{item.content}</Text>
                 </View>
-                <Text style={styles.lastMessage} numberOfLines={1}>{item.content}</Text>
-              </View>
-            </TouchableOpacity>
-          );
-        }}
-      />
-    </View>
+              </TouchableOpacity>
+            );
+          }}
+        />
+      </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background, paddingTop: 50, paddingHorizontal: 20 },
+  container: {
+    flex: 1,
+    backgroundColor: Colors.background,
+    paddingTop: 15,     // 🔥 antes era 50, ahora 15 porque Screen maneja el inset
+    paddingHorizontal: 20,
+  },
   title: { fontSize: 24, fontWeight: 'bold', marginBottom: 20, color: Colors.textPrimary },
-  chatItem: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    paddingVertical: 14, 
+  chatItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
     paddingHorizontal: 14,
     backgroundColor: Colors.surface,
     borderRadius: 16,

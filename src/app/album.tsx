@@ -3,11 +3,12 @@ import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Dimensions, FlatList, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Screen } from '../components/Screen'; // 👈 NUEVO
 import { Colors } from '../constants/Colors';
 import { supabase } from '../supabase';
 
 const { width } = Dimensions.get('window');
-const imageSize = width / 3 - 4; // Cuadrícula de 3 columnas
+const imageSize = width / 3 - 4;
 
 export default function UserProfileScreen() {
   const { userId, userName } = useLocalSearchParams();
@@ -22,8 +23,7 @@ export default function UserProfileScreen() {
       if (data?.user) {
         const myId = data.user.id;
         setCurrentUserId(myId);
-        
-        // Si no hay userId en los parámetros O el userId es igual al mío, cargamos mi álbum
+
         const targetId = (!userId || userId === myId) ? myId : userId;
         fetchPublicAlbum(targetId as string);
       }
@@ -93,7 +93,6 @@ export default function UserProfileScreen() {
 
       if (dbError) throw dbError;
 
-      // Refrescar el álbum local con la nueva foto instantáneamente
       fetchPublicAlbum(currentUserId);
     } catch (error: any) {
       Alert.alert('Error', 'No se pudo subir la foto: ' + error.message);
@@ -115,7 +114,6 @@ export default function UserProfileScreen() {
             return;
           }
 
-          // Eliminar del Storage opcionalmente
           const pathParts = imageUrl.split('/');
           const fileName = pathParts[pathParts.length - 1];
           await supabase.storage.from('chat-images').remove([fileName]);
@@ -126,79 +124,86 @@ export default function UserProfileScreen() {
     ]);
   };
 
-  // Es tu perfil si no hay userId externo o si el userId externo es exactamente tu ID
   const isMyProfile = !userId || userId === currentUserId;
 
   return (
-    <View style={styles.container}>
-      {/* HEADER */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Text style={styles.backButtonText}>←</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>{userName || (isMyProfile ? 'Mi Álbum' : 'Perfil de Usuario')}</Text>
-        <View style={{ width: 24 }} />
-      </View>
-
-      {/* INFORMACIÓN Y ACCIÓN DE CHAT (Si no es su propio perfil) */}
-      {!isMyProfile && (
-        <View style={styles.actionContainer}>
-          <TouchableOpacity style={styles.chatButton} onPress={handleStartChat} activeOpacity={0.8}>
-            <Ionicons name="chatbubble-outline" size={18} color="#000" style={{ marginRight: 8 }} />
-            <Text style={styles.chatButtonText}>Enviar Mensaje</Text>
+    <Screen
+      scroll={false}
+      backgroundColor={Colors.background}
+      paddingHorizontal={0}
+      paddingTop={0}
+      paddingBottom={0}
+    >
+      <View style={styles.container}>
+        {/* HEADER */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+            <Text style={styles.backButtonText}>←</Text>
           </TouchableOpacity>
+          <Text style={styles.headerTitle}>{userName || (isMyProfile ? 'Mi Álbum' : 'Perfil de Usuario')}</Text>
+          <View style={{ width: 24 }} />
         </View>
-      )}
 
-      <View style={styles.sectionTitleContainer}>
-        <Text style={styles.sectionTitle}>🌍 Álbum Público</Text>
-      </View>
-
-      {/* CUADRÍCULA DE FOTOS */}
-      {loading ? (
-        <View style={styles.loader}>
-          <ActivityIndicator size="large" color={Colors.primary} />
-        </View>
-      ) : photos.length === 0 ? (
-        <View style={styles.empty}>
-          <Text style={styles.emptyText}>
-            {isMyProfile ? 'Aún no has subido fotos a tu álbum público. Toca el botón "+" para agregar una.' : 'Este usuario aún no ha subido fotos.'}
-          </Text>
-        </View>
-      ) : (
-        <FlatList
-          data={photos}
-          numColumns={3}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              activeOpacity={0.9}
-              onLongPress={() => isMyProfile && handleDeletePhoto(item.id, item.image_url)}
-              style={styles.imageWrapper}
-            >
-              <Image source={{ uri: item.image_url }} style={styles.thumbnail} />
+        {/* INFORMACIÓN Y ACCIÓN DE CHAT */}
+        {!isMyProfile && (
+          <View style={styles.actionContainer}>
+            <TouchableOpacity style={styles.chatButton} onPress={handleStartChat} activeOpacity={0.8}>
+              <Ionicons name="chatbubble-outline" size={18} color="#000" style={{ marginRight: 8 }} />
+              <Text style={styles.chatButtonText}>Enviar Mensaje</Text>
             </TouchableOpacity>
-          )}
-          contentContainerStyle={styles.grid}
-        />
-      )}
+          </View>
+        )}
 
-      {/* BOTÓN FLOTANTE PARA SUBIR FOTO (Visible únicamente si es tu perfil) */}
-      {isMyProfile && (
-        <TouchableOpacity 
-          style={styles.fab} 
-          onPress={pickAndUploadPhoto} 
-          disabled={uploading}
-          activeOpacity={0.85}
-        >
-          {uploading ? (
-            <ActivityIndicator size="small" color="#000" />
-          ) : (
-            <Ionicons name="add" size={28} color="#000" />
-          )}
-        </TouchableOpacity>
-      )}
-    </View>
+        <View style={styles.sectionTitleContainer}>
+          <Text style={styles.sectionTitle}>🌍 Álbum Público</Text>
+        </View>
+
+        {/* CUADRÍCULA DE FOTOS */}
+        {loading ? (
+          <View style={styles.loader}>
+            <ActivityIndicator size="large" color={Colors.primary} />
+          </View>
+        ) : photos.length === 0 ? (
+          <View style={styles.empty}>
+            <Text style={styles.emptyText}>
+              {isMyProfile ? 'Aún no has subido fotos a tu álbum público. Toca el botón "+" para agregar una.' : 'Este usuario aún no ha subido fotos.'}
+            </Text>
+          </View>
+        ) : (
+          <FlatList
+            data={photos}
+            numColumns={3}
+            keyExtractor={(item) => item.id}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onLongPress={() => isMyProfile && handleDeletePhoto(item.id, item.image_url)}
+                style={styles.imageWrapper}
+              >
+                <Image source={{ uri: item.image_url }} style={styles.thumbnail} />
+              </TouchableOpacity>
+            )}
+            contentContainerStyle={styles.grid}
+          />
+        )}
+
+        {/* BOTÓN FLOTANTE PARA SUBIR FOTO */}
+        {isMyProfile && (
+          <TouchableOpacity
+            style={styles.fab}
+            onPress={pickAndUploadPhoto}
+            disabled={uploading}
+            activeOpacity={0.85}
+          >
+            {uploading ? (
+              <ActivityIndicator size="small" color="#000" />
+            ) : (
+              <Ionicons name="add" size={28} color="#000" />
+            )}
+          </TouchableOpacity>
+        )}
+      </View>
+    </Screen>
   );
 }
 
@@ -208,7 +213,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: 50,
+    paddingTop: 15,      // 🔥 antes era 50, ahora 15 porque Screen maneja el inset
     paddingHorizontal: 20,
     paddingBottom: 16,
     backgroundColor: Colors.surface,

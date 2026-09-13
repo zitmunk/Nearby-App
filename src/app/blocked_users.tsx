@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Screen } from '../components/Screen'; // 👈 NUEVO
 import { Colors } from '../constants/Colors';
 import { supabase } from '../supabase';
 
@@ -14,7 +15,6 @@ export default function BlockedUsersScreen() {
     fetchBlockedUsers();
   }, []);
 
-  // Retroceso seguro para evitar cierres o advertencias en web
   const handleBack = () => {
     if (router.canGoBack()) {
       router.back();
@@ -30,7 +30,6 @@ export default function BlockedUsersScreen() {
       const currentUserId = authData?.user?.id;
       if (!currentUserId) return;
 
-      // 1. Obtener los registros de la tabla blocks donde tú eres el blocker
       const { data: blocksData, error: blocksError } = await supabase
         .from('blocks')
         .select('id, blocked_id')
@@ -44,10 +43,8 @@ export default function BlockedUsersScreen() {
         return;
       }
 
-      // 2. Extraer los IDs de los usuarios bloqueados
       const blockedIds = blocksData.map((b) => b.blocked_id);
 
-      // 3. Obtener los perfiles de esos usuarios
       const { data: profilesData, error: profilesError } = await supabase
         .from('profiles')
         .select('*')
@@ -69,7 +66,6 @@ export default function BlockedUsersScreen() {
       const currentUserId = authData?.user?.id;
       if (!currentUserId) return;
 
-      // Eliminar el registro de la tabla blocks
       const { error } = await supabase
         .from('blocks')
         .delete()
@@ -82,7 +78,6 @@ export default function BlockedUsersScreen() {
           Alert.alert('Error', 'No se pudo desbloquear al usuario.');
         }
       } else {
-        // Actualizar la lista localmente
         setBlockedUsers((prev) => prev.filter((user) => user.id !== userIdToUnblock));
       }
     } catch (err: any) {
@@ -112,56 +107,68 @@ export default function BlockedUsersScreen() {
   };
 
   return (
-    <View style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={handleBack} style={styles.backButton} activeOpacity={0.8}>
-          <Ionicons name="arrow-back" size={24} color={Colors.textPrimary || '#FFFFFF'} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Usuarios Bloqueados</Text>
-      </View>
+    <Screen
+      scroll={false}
+      backgroundColor={Colors.background}
+      paddingHorizontal={0}
+      paddingTop={0}
+      paddingBottom={0}
+    >
+      <View style={styles.container}>
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleBack} style={styles.backButton} activeOpacity={0.8}>
+            <Ionicons name="arrow-back" size={24} color={Colors.textPrimary || '#FFFFFF'} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Usuarios Bloqueados</Text>
+        </View>
 
-      {loading ? (
-        <ActivityIndicator size="large" color={Colors.primary} style={{ marginTop: 40 }} />
-      ) : (
-        <FlatList
-          data={blockedUsers}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.listContainer}
-          ListEmptyComponent={
-            <Text style={styles.emptyText}>No tienes ningún usuario bloqueado.</Text>
-          }
-          renderItem={({ item }) => (
-            <View style={styles.userCard}>
-              <Image
-                source={{
-                  uri: (item.avatar_url || '').trim() || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300',
-                }}
-                style={styles.avatar}
-              />
-              <View style={styles.userInfo}>
-                <Text style={styles.userName} numberOfLines={1}>
-                  {item.full_name || item.username || 'Usuario'}
-                </Text>
-                <Text style={styles.userSub}>Bloqueado</Text>
+        {loading ? (
+          <ActivityIndicator size="large" color={Colors.primary} style={{ marginTop: 40 }} />
+        ) : (
+          <FlatList
+            data={blockedUsers}
+            keyExtractor={(item) => item.id}
+            contentContainerStyle={styles.listContainer}
+            ListEmptyComponent={
+              <Text style={styles.emptyText}>No tienes ningún usuario bloqueado.</Text>
+            }
+            renderItem={({ item }) => (
+              <View style={styles.userCard}>
+                <Image
+                  source={{
+                    uri: (item.avatar_url || '').trim() || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300',
+                  }}
+                  style={styles.avatar}
+                />
+                <View style={styles.userInfo}>
+                  <Text style={styles.userName} numberOfLines={1}>
+                    {item.full_name || item.username || 'Usuario'}
+                  </Text>
+                  <Text style={styles.userSub}>Bloqueado</Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.unblockButton}
+                  onPress={() => handleUnblock(item.id)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.unblockButtonText}>Desbloquear</Text>
+                </TouchableOpacity>
               </View>
-              <TouchableOpacity
-                style={styles.unblockButton}
-                onPress={() => handleUnblock(item.id)}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.unblockButtonText}>Desbloquear</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        />
-      )}
-    </View>
+            )}
+          />
+        )}
+      </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background, paddingTop: 40 },
+  container: {
+    flex: 1,
+    backgroundColor: Colors.background,
+    paddingTop: 15,     // 🔥 antes era 40, ahora 15 porque Screen maneja el inset
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',

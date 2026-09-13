@@ -29,6 +29,7 @@
       },
       "googleServicesFile": "./google-services.json",
       "predictiveBackGestureEnabled": false,
+      "versionCode": 2,
       "permissions": [
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
@@ -36,7 +37,8 @@
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",
-        "android.permission.MODIFY_AUDIO_SETTINGS"
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.POST_NOTIFICATIONS"
       ],
       "package": "com.nowchat"
     },
@@ -54,7 +56,6 @@
           "imageWidth": 76
         }
       ],
-      
       [
         "expo-location",
         {
@@ -67,7 +68,18 @@
           "photosPermission": "La aplicación necesita acceso a tus fotos para enviarlas en el chat."
         }
       ],
-     
+      "react-native-compressor",
+      "expo-video",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/notification-icon.png",
+          "color": "#208AEF",
+          "defaultChannel": "default"
+        }
+      ],
+      "expo-status-bar",
+      "@react-native-community/datetimepicker"
     ],
     "experiments": {
       "typedRoutes": true,
